@@ -1,0 +1,4 @@
+# Engine-only config. Project workers are not declared here.
+# An empty list keeps the legacy built-in HTTP service off, so the
+# registry `http` worker can own the `http` trigger type.
+workers: []

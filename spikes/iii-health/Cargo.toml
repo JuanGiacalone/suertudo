@@ -1,0 +1,20 @@
+[package]
+name = "iii-health-spike"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+iii-sdk = "=0.24.6"
+serde_json = "1"
+
+hmac = "0.12"
+sha2 = "0.10"
+
+[lib]
+name = "iii_health_spike"
+path = "src/lib.rs"
+
+[[bin]]
+name = "iii-health-spike"
+path = "src/main.rs"

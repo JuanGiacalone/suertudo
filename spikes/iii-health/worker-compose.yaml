@@ -1,0 +1,8 @@
+namespace: spike
+engine:
+  url: ws://127.0.0.1:49134
+containers:
+  # added by compose::add
+  http:
+    worker: package://api.workers.iii.dev/http
+    version: "0.22.7"

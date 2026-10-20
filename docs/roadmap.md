@@ -66,6 +66,8 @@ Los PRs encadenados se apilan así: `PR-1` (base) → `PR-2` (apila sobre `PR-1`
 
 **Criterio de salida:** `GET /v1/health` responde 200, un usuario puede registrarse por magic link y obtener un token, y el CI está verde en los tres stacks.
 
+> **Estado:** el spike `spikes/iii-health` ya validó el engine, el worker `http` del registro, un worker Rust propio y la ruta HTTP completa, **sin KVM**. También fijó las versiones de iii (engine 0.24.6 + SDK 0.24.6) y entregó el golden test de la derivación commit–reveal. Ver `spikes/iii-health/README.md`. Queda por verificar la ruta de colas: `TSK-F0-06`.
+
 ---
 
 ### `TSK-F0-01` — Esqueleto del monorepo
@@ -181,7 +183,27 @@ README.md
 
 ---
 
-## 3. Fase 1 — MVP vertical
+### `TSK-F0-06` — Cola y cron de iii (path sin verificar)
+
+**Épica:** E0.6 · **Depende de:** `TSK-F0-02` · **Esfuerzo:** 1 d
+
+**Contexto:** el spike `spikes/iii-health` verificó el engine, los triggers `http` y el registro de funciones, pero **no** la ruta de colas. El engine registra un warning explícito: `trigger type durable:subscriber is not registered ... If this persists, the queue worker is missing`. `draws::execute_draw` y `notifications::dispatch` dependen de esa ruta, así que hay que probarla antes de construir encima.
+
+**Archivos:** `spikes/iii-health/verify.sh` (extender), `infra/docker-compose.yml` (RabbitMQ)
+
+**Criterios de aceptación:**
+- [ ] RabbitMQ levanta por docker compose y el worker `queue` del registro alcanza estado `ready`.
+- [ ] Un mensaje encolado con `TriggerAction::Enqueue { queue: "..." }` es consumido por un suscriptor.
+- [ ] Un consumidor que falla reintenta 3 veces con backoff y después va a la DLQ.
+- [ ] `engine::queue::topic_stats` muestra la profundidad y la DLQ vacía.
+- [ ] Un trigger `cron` de 1 minuto se dispara efectivamente.
+- [ ] `engine::queue::dlq_messages` lista un mensaje dead-lettered y `redrive` lo reprocesa.
+- [ ] Todo el stack sigue levantando **sin KVM**.
+- [ ] `verify.sh` queda como el smoke test del CI, con teardown por nombre de proceso exacto.
+
+**Verificación:** `unshare -rm ./spikes/iii-health/verify.sh` → `RESULTADO: PASS`
+
+---
 
 **Objetivo:** el bucle completo funcionando. Un negocio crea un sorteo con IA, un participante reserva números, el sistema sortea de forma verificable, el ganador se entera y el negocio ve su lista.
 
@@ -586,7 +608,7 @@ Backlog abierto, priorizado por evidencia del uso real.
 
 | Fase | Épicas | Tareas detalladas | Esfuerzo | Riesgo principal |
 |---|---|---|---|---|
-| 0 — Cimientos | 5 | 5 | ~6,5 d | Que iii no funcione sin KVM (`R2`) |
+| 0 — Cimientos | 6 | 6 | ~7,5 d | La ruta de colas, sin verificar (`TSK-F0-06`) |
 | 1 — MVP vertical | 10 | 25 | ~42 d | La reserva transaccional (`TSK-F1-12`) |
 | 2 — Crecimiento | 10 | por detallar | ~30 d | Cobro de la suscripción |
 | 3 — Expansión | 8 | por detallar | ~40 d+ | Dependencia de terceros (lotería, CRM) |

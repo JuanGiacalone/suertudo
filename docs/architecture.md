@@ -405,17 +405,21 @@ LLM (probabilístico) → JSON Schema → anclas → contraste → copy → vers
 
 ### ADR-011 — Los workers corren como procesos propios, no en microVM de iii
 
-**Estado:** Aceptado
+**Estado:** Aceptado · **Verificado por el spike `spikes/iii-health`**
 
 **Contexto:** El aislamiento por microVM de iii requiere `/dev/kvm`. En CI y en muchos servicios de cloud eso no está disponible.
 
 **Hecho verificado (documentación de iii):** *"Any process that uses an iii SDK, calls `registerWorker()`, and connects to a iii instance is a worker, and behaves identically whether iii started it or not."* El manifiesto `iii.worker.yaml` solo importa si iii provisions el worker.
+
+**Verificado empíricamente (spike):** el worker `http` del registro es `Type: binary` y corre como proceso del host. El spike levanta el stack completo dentro de un namespace de mounts con `/dev/kvm` enmascarado y comprueba que ningún proceso `iii-worker` llega a existir.
 
 **Decisión:**
 - **Desarrollo y CI:** los workers corren como procesos locales (`cargo run`), conectando al motor por WebSocket. Sin microVM, sin KVM.
 - **Producción:** los workers corren en contenedores Docker gestionados por el orquestador de iii **o** por Docker Compose, según el tamaño del despliegue. La opción de microVM queda para cuando el aislamiento por tenant lo justifique.
 
 **Consecuencias:** el `iii.worker.yaml` se mantiene en el repo (documenta el runtime y las dependencias) pero **no es obligatorio** para que un worker funcione. El CI no necesita KVM.
+
+**Trampa operativa (medida en el spike):** el worker `http` del registro **se reconecta solo al engine** después de una caída. Si sobrevive a una corrida, la siguiente falla con `CONTAINER_NAME_TAKEN`. Su nombre de proceso es `http`, no `iii-*`. El teardown tiene que matarlo por nombre exacto.
 
 ---
 
@@ -608,7 +612,28 @@ El `key_id` se guarda junto al ciphertext. Rotar es: descifrar con la clave viej
 
 **Regla:** en `local` y `staging` no se mandan push ni emails reales salvo que el destinatario esté en una allow-list. Un test que dispara notificaciones en staging no debe llegar a un usuario real.
 
-### 8.6 Actualización de iii
+### 8.6 Versiones de iii
+
+**Versión fijada: engine `0.24.6` + `iii-sdk` `0.24.6`.** El archivo `infra/iii/VERSION` los declara juntos y el CI verifica que coincidan.
+
+```yaml
+# infra/iii/VERSION
+iii=0.24.6
+iii-sdk=0.24.6
+```
+
+**Por qué 0.24.6 y no el 0.25 RC.** Medido en el spike (`spikes/iii-health`):
+
+| SDK crate | Compila | Registra función | Registra trigger `http` |
+|---|---|---|---|
+| `0.24.6` | sí | funciona | **funciona** — la ruta responde |
+| `0.25.0-rc.4` | sí | funciona | **rechazado** — queda en `PENDING`, la ruta nunca existe |
+
+El RC deprecó `register_trigger` en favor de `iii.observe(...)`, que el engine 0.24.6 no implementa. El resultado es un estado **medio roto y silencioso**: la función aparece registrada en `engine::workers::list` (todo parece bien) pero la ruta HTTP no existe. Eso es peor que un error de compilación, y es la razón concreta de que la regla de §8.7 exija assertar una **ruta respondiendo 200**, no solo un worker registrado.
+
+> **Nota:** el texto de esta tabla se corrigió durante la redacción; la API del RC es `iii.observe`, no `iii.observe`-con-varios-argumentos. Verificar la firma exacta contra `docs.rs` de la versión instalada antes de migrar.
+
+### 8.7 Actualización de iii
 
 El SDK y el motor de iii evolucionan rápido y el crate de Rust está en **release candidate**. Esta sección define el procedimiento para subirlos sin romper producción.
 

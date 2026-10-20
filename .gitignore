@@ -1,0 +1,31 @@
+# Rust
+/target
+**/target
+
+# iii
+**/.iii/
+worker-compose.lock
+
+# Node
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+
+# Flutter
+.dart_tool/
+.packages
+build/
+.flutter-plugins
+.flutter-plugins-dependencies
+*.iml
+
+# Env
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# OS
+.DS_Store
+Thumbs.db
