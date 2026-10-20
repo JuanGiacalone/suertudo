@@ -5,6 +5,8 @@
 # iii
 **/.iii/
 worker-compose.lock
+# El cache de sqlx SI se commitea: es lo que hace el build reproducible
+# sin una base de datos.
 
 # Node
 node_modules/

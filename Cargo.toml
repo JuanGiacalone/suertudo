@@ -1,0 +1,83 @@
+[workspace]
+resolver = "3"
+members = ["services/api", "services/db", "services/identity"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+# --- iii -------------------------------------------------------------------
+# Pinned exactly. The engine and the SDK must move together, in the same PR.
+# See docs/architecture.md §8.6 and docs/spike-iii-health.md §5.2.
+iii-sdk = "=0.24.6"
+
+# --- data ------------------------------------------------------------------
+sqlx = { version = "0.9", features = [
+    "runtime-tokio",
+    "tls-rustls",
+    "postgres",
+    "uuid",
+    "chrono",
+    "json",
+    "migrate",
+    "macros",
+] }
+
+# --- serialisation ---------------------------------------------------------
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Must stay on 0.8: iii-sdk 0.24.6 depends on schemars 0.8, and the
+# JsonSchema derive has to produce the same type the SDK expects.
+schemars = "0.8"
+
+# --- async runtime ---------------------------------------------------------
+tokio = { version = "1", features = ["full"] }
+futures-util = "0.3"
+
+# --- observability ---------------------------------------------------------
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# --- errors ----------------------------------------------------------------
+thiserror = "2"
+anyhow = "1"
+
+# --- primitives ------------------------------------------------------------
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+rand = "0.8"
+hex = "0.4"
+base64 = "0.23"
+getrandom = "0.3"
+
+# --- crypto ----------------------------------------------------------------
+# Versions aligned with the ones the derivation golden test was frozen with.
+sha2 = "0.10"
+hmac = "0.12"
+aes-gcm = "0.10"
+argon2 = "0.5"
+jsonwebtoken = "9"
+
+# --- dev -------------------------------------------------------------------
+sqlx-cli = { version = "0.9", features = ["postgres", "macros"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+# The domain is written without unwrap/expect on purpose: a panic in a worker
+# kills the process and the engine sees the function as gone.
+unwrap_used = "warn"
+expect_used = "warn"
+todo = "warn"
+dbg_macro = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

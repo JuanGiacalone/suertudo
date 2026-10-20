@@ -1,0 +1,11 @@
+# iii engine and SDK versions. They must move together, in the same PR.
+# See docs/architecture.md §8.6 and §8.7.
+iii=0.24.6
+iii-sdk=0.24.6
+
+# Registry workers that provide the trigger types. The engine ships none of
+# them: without these the triggers stay PENDING forever.
+# See docs/spike-iii-health.md §5.6.
+http=0.22.7
+queue=0.21.22
+cron=0.21.26

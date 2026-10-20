@@ -1,0 +1,9 @@
+# Engine configuration.
+#
+# The list is empty on purpose: it keeps the legacy built-in HTTP and queue
+# services off, so the registry workers can own those trigger types.
+# Project workers are declared in worker-compose.yaml, never here.
+#
+# See docs/architecture.md §"Engine configuration" and
+# docs/spike-iii-health.md §5.6.
+workers: []
