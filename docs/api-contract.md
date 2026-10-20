@@ -934,14 +934,35 @@ El `namespace` de un worker define dónde se registran sus funciones y dónde se
 | `cron` | `draws::close_due_raffles` | `{ "expression": "0 * * * * *" }` | Cada minuto |
 | `cron` | `draws::execute_draw` | `{ "expression": "0 * * * * *" }` | Cada minuto |
 | `cron` | `notifications::expire_prizes` | `{ "expression": "0 3 * * * *" }` | 03:00 diario |
-| `queue` (con nombre) | `notifications::dispatch` | `queue_configs: { "notifications": { "function_id": "notifications::dispatch" } }` | Mensaje encolado |
-| `queue` (con nombre) | `crm::export_participants` | `queue_configs: { "exports": { "function_id": "crm::export_participants" } }` | Export encolado |
+| `queue` (con nombre) | `notifications::dispatch` | `queue_configs: { "notifications": { "type": "standard", "concurrency": 10, "max_retries": 3, "backoff_ms": 1000 } }` | Mensaje encolado |
+| `queue` (con nombre) | `crm::export_participants` | `queue_configs: { "exports": { "type": "standard", "max_retries": 3 } }` | Export encolado |
 | `durable:subscriber` | `raffles::broadcast_event` | `{ "topic": "raffle-events" }` | Cambio de estado del sorteo |
 | `state` | `raffles::invalidate_cache` | `{ "scope": "raffle" }` | Cambio de estado del sorteo |
 
 **El cron de `execute_draw` corre cada minuto.** Un sorteo con `draws_at` vencido se sortea dentro de esa ventana (p95 ≤ 60 s, `NFR-PL-05`).
 
-**Las dos clases de cola de iii se usan para cosas distintas, y elegirlas mal rompe el comportamiento esperado:**
+### 7.3.1 Los tipos de trigger no vienen con el engine
+
+**Ningún tipo de trigger de cola ni de cron está incluido en el engine.** Cada uno necesita su worker del registro, y sin él el trigger queda en `PENDING` para siempre:
+
+| Tipo de trigger | Worker del registro que lo provee | Qué pasa si falta |
+|---|---|---|
+| `http` | `http` (v0.22.7) | `Trigger type http is not registered` |
+| `durable:subscriber` | `queue` (v0.21.22) | `Trigger type durable:subscriber is not registered` |
+| `cron` | `cron` (v0.21.26) | `Trigger type cron is not registered` |
+
+El engine lo dice explícitamente en el log, con el comando exacto:
+
+```
+[WARN] iii::trigger Trigger ... was NOT activated: trigger type cron is not registered.
+It will be registered automatically when the trigger type becomes available.
+If this persists, the cron worker is missing — run:
+iii trigger -n <compose-daemon-namespace> compose::add worker=cron
+```
+
+**Regla para el CI:** el smoke test tiene que assertar que el log del engine **no** contiene `is not registered` para ningún tipo de trigger. Un health check que solo mira un `200` no lo detecta: el sistema queda con las funciones registradas y sin ninguna ruta, que es exactamente el modo de fallo silencioso que el spike de iii documentó.
+
+### 7.3.2 Las dos clases de cola de iii
 
 | | Cola con nombre (`TriggerAction::Enqueue`) | Pub/sub (`durable:subscriber`) |
 |---|---|---|
@@ -962,7 +983,51 @@ let receipt = worker.trigger(TriggerRequest {
 }).await?;
 ```
 
-El nombre de la cola en RabbitMQ **cambió en iii 0.23.x y no se migra automáticamente**. Hay que redeclarar las colas durables al actualizar de versión (ver §"Actualización de iii" en [`architecture.md`](./architecture.md)).
+### 7.3.3 Definir una named queue
+
+Una named queue **tiene que existir antes de encolar**. Si no, el enqueue falla:
+
+```
+enqueue_error: queue 'notifications' is not defined; call queue::define before enqueueing
+```
+
+La definición se hace con `queue::define` o declarando `queue_configs` en la configuración del worker `queue`.
+
+```json
+{
+  "queue": "notifications",
+  "config": {
+    "type": "standard",
+    "concurrency": 10,
+    "max_retries": 3,
+    "backoff_ms": 1000
+  }
+}
+```
+
+**El schema de `config` es estricto y rechaza campos desconocidos.** Los campos aceptados son exactamente: `max_retries`, `concurrency`, `timeout_ms`, `type`, `message_group_field`, `backoff_ms`, `poll_interval_ms`, `redeliver_on_engine_restart`, `max_priority`, `priority_field`.
+
+Tres trampas que costaron tiempo:
+
+| Trampa | Consecuencia |
+|---|---|
+| `type` solo admite `standard` o `fifo`. `concurrent` no existe en este schema. | `handler error: queue 'X' type must be either 'standard' or 'fifo'` |
+| `type: fifo` **exige** `message_group_field`. | `handler error: queue 'X' with type 'fifo' requires message_group_field` |
+| `function_id` **no** es parte de la config. | La función destino viaja con cada mensaje, en `TriggerAction::Enqueue` o en `engine::queue::enqueue`. |
+
+**La función destino viaja con el mensaje, no con la cola.** Una named queue define el transporte (tipo, concurrencia, reintentos); el `function_id` va en cada enqueue:
+
+```rust
+// Encolar: la función destino va en la petición
+worker.trigger(TriggerRequest {
+    function_id: "notifications::dispatch".into(),
+    payload: json!({ "notification_id": n_id }),
+    action: Some(TriggerAction::Enqueue { queue: "notifications".into() }),
+    timeout_ms: None,
+}).await?;
+```
+
+`TriggerAction::Enqueue` **funciona en el engine 0.24.6**: el corte `QueueEnqueuer` está presente y el engine enruta la acción a través del provider `engine::queue::enqueue` del worker `queue`. Verificado en el spike.
 
 ### 7.4 Ejemplo de registro
 

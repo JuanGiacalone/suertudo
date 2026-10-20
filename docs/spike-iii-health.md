@@ -12,11 +12,13 @@ Antes de escribir el monorepo, se levantó el stack real de iii en una máquina 
 
 | Veredicto | Detalle |
 |---|---|
-| Stack completo sin KVM | **PASS** — engine, worker del registro y worker Rust propio, `GET /v1/health` → `200` |
+| Stack completo sin KVM | **PASS** — engine, workers del registro y worker Rust propio, `GET /v1/health` → `200` |
 | Fórmula commit–reveal reproducible | **PASS** — 7 tests, golden values calculados con una implementación independiente |
+| Ruta de colas y cron | **PASS** — publish, consume, named queue, 3 reintentos, DLQ, redrive, discard, cron |
+| Ambos transportes de cola | **PASS** — `builtin` y `rabbitmq` verificados con el mismo script |
 | Riesgo `R1` (SDK en RC) | **Cerrado** — engine y SDK fijados en `0.24.6` |
 | Riesgo `R2` (KVM en CI) | **Cerrado** — el CI no necesita `/dev/kvm` |
-| Ruta de colas | **Abierta** → [`TSK-F0-06`](./roadmap.md) |
+| Transporte de producción de la cola | **Decidido: `builtin`** — [`ADR-013`](./architecture.md) |
 
 ---
 
@@ -218,6 +220,114 @@ El chequeo de precondición "no hay procesos iii vivos" usaba `pgrep -f 'iii --c
 
 La corrección: `pgrep -x` (match exacto por nombre de proceso) y `pkill -9 -x`. Un nombre exacto no puede auto-matchearse.
 
+### 5.6 El engine no trae ningún trigger de cola ni de cron
+
+**Este es el hallazgo que más afecta al diseño del producto.** El engine 0.24.6 no incluye los tipos de trigger `durable:subscriber` ni `cron`: cada uno necesita su **worker del registro**.
+
+| Tipo de trigger | Worker del registro | Versión |
+|---|---|---|
+| `http` | `http` | 0.22.7 |
+| `durable:subscriber` | `queue` | 0.21.22 |
+| `cron` | `cron` | 0.21.26 |
+
+Sin ellos, el trigger queda en `PENDING` **para siempre** y el engine lo dice:
+
+```
+[WARN] iii::trigger Trigger ... was NOT activated: trigger type cron is not registered.
+It will be registered automatically when the trigger type becomes available.
+If this persists, the cron worker is missing — run:
+iii trigger -n <compose-daemon-namespace> compose::add worker=cron
+```
+
+**Por qué importa:** `draws::close_due_raffles` y `draws::execute_draw` —los dos jobs que cierran y ejecutan sorteos— dependen del tipo `cron`. Un backend sin el worker `cron` **no sortea nada**, y el síntoma es un sorteo que nunca se cierra, no un error.
+
+**Consecuencia para el CI:** el smoke test tiene que assertar que el log del engine no contiene `is not registered` para ningún tipo. Un health check que solo mira un `200` no lo detecta: el sistema queda con las funciones registradas y sin rutas. Es el mismo modo de fallo silencioso que el RC de §5.2, y por eso la aserción tiene que ser explícita.
+
+### 5.7 `TriggerAction::Enqueue` funciona, pero la cola tiene que existir
+
+La doc del worker `queue` advertía: *"The `TriggerAction::Enqueue` path requires an engine version that routes named enqueue actions through the registered `engine::queue::enqueue` provider."* **El engine 0.24.6 tiene ese corte.** Verificado: encolar devuelve `messageReceiptId` y el consumidor recibe el mensaje.
+
+Pero la named queue tiene que definirse antes, y el schema es **estricto**. Tres trampas, cada una con su error:
+
+| Trampa | Error que devuelve |
+|---|---|
+| `type: concurrent` | `queue 'X' type must be either 'standard' or 'fifo'` |
+| `type: fifo` sin `message_group_field` | `queue 'X' with type 'fifo' requires message_group_field` |
+| `function_id` dentro de la config | `unknown field 'function_id', expected one of 'max_retries', 'concurrency', ...` |
+
+**La función destino viaja con el mensaje, no con la cola.** Una named queue define el transporte; cada enqueue lleva su `function_id`. Es un detalle de diseño que cambia cómo se escribe el código de notificaciones.
+
+### 5.8 El worker `cron` colisiona con el cron del sistema
+
+El worker `cron` del registro corre como un proceso cuyo nombre es **`cron`**, exactamente igual que el scheduler del sistema (`/usr/sbin/cron`).
+
+```
+635   cron   /usr/sbin/cron -f -P                                    ← el del sistema
+23070 cron   ~/.iii/compose/packages/cron-0.21.26-.../cron           ← el de iii
+```
+
+Un `pkill -x cron` en un script de teardown **mata el cron del sistema**. Es un error que no se manifiesta en el script (que sigue bien) sino en la máquina (que deja de programar tareas).
+
+**La regla: los workers del registro se identifican por su ruta de ejecutable**, no por su nombre. `~/.iii/compose/packages/` es único y no puede matchear un proceso ajeno.
+
+### 5.9 Linux trunca los nombres de proceso a 15 caracteres
+
+`iii-health-spike` (16 caracteres) se registra como `iii-health-spik`. Un `pkill -9 -x iii-health-spike` **no matchea nada y no da error**: el worker viejo seguía vivo y seguía respondiendo con el código viejo, lo que hizo que un fix pareciera no aplicada.
+
+Esto se combina con §5.4: el nombre exacto que se debe usar es el truncado, y para los workers del registro, la ruta.
+
+### 5.10 El SDK de Rust exige un `.await` explícito
+
+`RegisterFunction::new_async` con un closure que llama a `worker.trigger(...)` **no compila** si el future se retorna sin `await`:
+
+```rust
+// NO compila: la inferencia de R (el tipo de retorno) no resuelve
+RegisterFunction::new_async(move |payload: Value| async move {
+    publisher.trigger(TriggerRequest { .. })   // future sin await
+})
+
+// Compila
+RegisterFunction::new_async(move |payload: Value| async move {
+    publisher.trigger(TriggerRequest { .. }).await
+})
+```
+
+El error que devuelve el compilador es inútil para diagnosticar: `the trait bound {closure@...}: IntoAsyncHandler<_> is not satisfied`. La causa real es que `trigger` es genérico sobre `impl Into<TriggerRequestWithMetadata>`, y al retornar el future sin `await` el compilador no puede inferir el tipo de retorno.
+
+**Regla: siempre `.await` explícito en los handlers async.** Vale la pena conocerlo porque el mensaje del error no lleva a la causa.
+
+### 5.11 En RabbitMQ la DLQ es inalcanzable desde iii
+
+El worker `queue` ofrece tres transportes. `builtin` (in-process, file-backed) es el default y no necesita broker. `rabbitmq` es el completo con broker externo. Los dos se verificaron contra un broker real (RabbitMQ 4.4.0).
+
+| Operación | `builtin` | `rabbitmq` |
+|---|---|---|
+| Publicar y consumir | ✅ | ✅ |
+| Named queue con `TriggerAction::Enqueue` | ✅ | ✅ |
+| 3 reintentos con backoff → DLQ | ✅ | ✅ |
+| `dlq_messages` (listar la DLQ) | ✅ ve el mensaje | ❌ devuelve `[]` |
+| `dlq_topics` | ✅ | ❌ devuelve `[]` |
+| `topic_stats` → `dlq_depth` | ✅ correcto | ❌ reporta `0`, **miente** |
+| `redrive` (reprocesar) | ✅ | ❌ `NOT_FOUND: no queue 'iii.spike-fail.dlq'` |
+| `discard_message` | ✅ | ❌ (misma causa) |
+
+**La causa.** En RabbitMQ, los reintentos escriben en la DLQ **por función**:
+
+```
+iii.spike-fail.queue::fail_always@spike.dlq     msgs=1   ← el mensaje está acá
+iii.spike-fail.queue::fail_always@spike.queue   msgs=0
+```
+
+Pero la API de DLQ de iii direcciona el **topic desnudo** (`iii.spike-fail.dlq`), que no existe. El mensaje queda en el broker y **nadie puede verlo, reprocesarlo ni descartarlo desde iii**: hay que ir a la API de administración de RabbitMQ a mano.
+
+La propia documentación de iii lo reconoce y lo remite a un ticket upstream (`MOT-3904`).
+
+**Por qué esto decide la arquitectura.** Un producto cuyo ciclo central es "sortear → notificar al ganador" necesita poder **operar** los mensajes que fallaron. Si un push al ganador queda dead-lettered y no se puede re-encolar, esa persona no se entera nunca. Con `builtin`, la DLQ es operable con la API.
+
+**Decisión: `builtin` en producción** (`ADR-013`). Además evita un broker externo: un servicio menos que operar y que puede caerse.
+
+**Regla para futuros agentes:** cuando se mida un comportamiento, se miden **los dos** caminos, no solo el que funciona. El `builtin` daba verde en las 13 secciones y el `rabbitmq` también daba verde en las 9 primeras: la diferencia solo apareció en las de DLQ, que son las que importan.
+
 ---
 
 ## 6. Correcciones que este spike imponió a los documentos previos
@@ -245,16 +355,23 @@ Reglas operativas, derivadas de los hallazgos. Todas son verificables.
 | **Engine y SDK siempre en la misma versión, y en el mismo PR.** | El RC deprecó una API que el engine estable no implementa. El fallo es silencioso. |
 | **Nunca uses `latest` ni un tag flotante** fuera de `local`. | La resolución de versión tiene que ser reproducible. `infra/iii/VERSION` declara ambas. |
 | **El smoke test del CI asserta una RUTA respondiendo `200`.** | Un worker registrado en `engine::workers::list` puede no tener ninguna ruta. Ese fue exactamente el fallo del RC. |
-| **Aserteá también que el log del engine NO contiene `durable:subscriber is not registered`.** | El engine loguea ese warning cuando falta el worker `queue`. Un health check que solo mira el `200` no lo detecta. |
+| **El smoke test también asserta que el log del engine no dice `is not registered`.** | Es el síntoma del worker faltante. Sin esa aserción, un backend sin `queue` ni `cron` parece sano y no sortea nada. |
+| **Todo tipo de trigger que uses necesita su worker del registro declarado.** | `http`, `queue` y `cron` son tres workers separados. `worker-compose.yaml` tiene que listar los tres. |
+| **Medí los dos transportes de cola, no solo el que funciona.** | `builtin` daba verde en las 13 secciones y `rabbitmq` en las 9 primeras. La diferencia —la DLQ inalcanzable— solo apareció en las secciones que importan. |
+| **El transporte de cola de producción es `builtin`** (`ADR-013`). | En RabbitMQ la API de DLQ no puede direccionar la DLQ por función: los mensajes muertos quedan inaccesibles desde iii. |
 | **Un worker Rust que solo registra y sale del `main` muere al instante.** | Los hilos del SDK no mantienen vivo el proceso. Llamá `std::thread::park()` al final, o `shutdown_async()`. |
 | **`compose::add` edita el YAML; `compose::up` arranca lo declarado.** | Son dos operaciones distintas y la confusión entre ellas produce un worker en estado `stopped`. |
+| **`.await` explícito en todo handler async del SDK.** | `RegisterFunction::new_async` no compila si se retorna el future de `trigger` sin `await`, y el error no lleva a la causa. |
+| **Definí la named queue antes de encolar, y recordá que la función destino va en el mensaje.** | El schema de `queue::define` es estricto: `type` es `standard` o `fifo`, `fifo` exige `message_group_field`, y `function_id` no pertenece a la config. |
 
 ### 7.2 Sobre los scripts
 
 | Regla | Por qué |
 |---|---|
-| **Usá `pgrep -x` y `pkill -x`, nunca `-f`.** | `-f` matchea la propia línea de comandos del script: el chequeo miente y el teardown se suicida. |
-| **El teardown tiene que matar al worker `http` por su nombre de proceso exacto.** | Se llama `http`, no `iii-*`, y se reconecta solo al engine. Si sobrevive, la corrida siguiente falla con `CONTAINER_NAME_TAKEN`. |
+| **Identificá los workers del registro por su ruta de ejecutable, nunca por nombre de proceso.** | El worker `cron` comparte nombre con `/usr/sbin/cron` del sistema. Un `pkill -x cron` mata el scheduler del SO. |
+| **Recordá que Linux trunca los nombres a 15 caracteres.** | `iii-health-spike` es `iii-health-spik`. Un `pkill -x` con el nombre largo no matchea nada y deja el worker viejo sirviendo. |
+| **Usá `pgrep -x` y `pkill -x`, nunca `-f`, para nombres de proceso.** | `-f` matchea la propia línea de comandos del script: el chequeo miente y el teardown se suicida. |
+| **El teardown tiene que matar a los workers del registro.** | Se reconectan solos al engine. Si sobreviven, la corrida siguiente falla con `CONTAINER_NAME_TAKEN`. |
 | **Cada corrida del smoke test tiene que terminar con cero procesos iii vivos.** | Es la precondición de la corrida siguiente. `verify.sh` lo asserta al principio y lo limpia al salir. |
 | **Para probar la ausencia de KVM: `unshare -rm` + `mount --bind /dev/null /dev/kvm`.** | `stat -c '%t,%T'` da `1,3` en hex cuando el KVM está enmascarado, `a,e8` cuando es real. |
 
@@ -283,12 +400,12 @@ Honestidad sobre los límites. La lista es corta a propósito.
 
 | No cubierto | Por qué importa | Dónde se cierra |
 |---|---|---|
-| **Ruta de colas** (worker `queue`, `Enqueue`, reintentos, DLQ, `redrive`) | `draws::execute_draw` y `notifications::dispatch` dependen de ella. El patrón *transactional outbox* del PRD la usa en el camino crítico del sorteo. | `TSK-F0-06` |
-| **Triggers `cron`** | El cierre y la ejecución de sorteos dependen de un cron de 1 minuto. | `TSK-F0-06` |
-| **Postgres, Redis, RabbitMQ** | El spike no levantó ningún servicio de datos. | `TSK-F0-03` |
+| **Postgres, Redis** | El spike no levantó ningún servicio de datos. | `TSK-F0-03` |
 | **Auth, RBAC, middleware, namespaces múltiples** | El spike usó un solo namespace, sin autenticación. | `TSK-F0-04` |
 | **Workers `bundle` y `iii-worker`** | Los que sí necesitan VM. No se usan en Suertudo. | Fuera de alcance |
 | **Observabilidad y trazas OTel** | El engine la inicializa, pero no se verificó el pipeline completo. | `TSK-F0-05` |
+| **Comportamiento bajo caída del broker** | Qué pasa con los mensajes en vuelo si el worker de cola se cae a mitad de un reintento. | Fase 1, con la carga real |
+| **El fix upstream `MOT-3904`** | Si iii corrige la direccionación de la DLQ en RabbitMQ, hay que repetir la comparación de §5.11. | Cuando salga el fix |
 
 **La regla:** el spike cierra el riesgo que bloquearía la Fase 0. No pretende ser la Fase 0.
 
@@ -310,12 +427,17 @@ Salida esperada:
 ### 0. Precondición: sin procesos iii previos      OK: limpio
 ### 1. Estado de KVM                                OK
 ### 2. Engine                                       OK: engine escuchando en 49134
-### 3. Worker http del registro                     OK: worker http ready (0.22.7)
+### 3. Workers del registro (http, queue, cron)     OK
 ### 4. Worker Rust propio                           OK: worker registrado
 ### 5. GET /v1/health                               OK: HTTP 200
 ### 6. Invocación directa por el engine             OK
 ### 7. Sin microVM                                  OK: ningún proceso iii-worker
-### 8. Golden test de la derivación                 OK: tests verdes (7 passed)
+### 8. Cola: publicar y consumir                    OK
+### 9. Named queue vía TriggerAction::Enqueue       OK
+### 10. Reintentos y DLQ                           OK
+### 11. Redrive y discard de la DLQ                OK
+### 12. Cron                                       OK
+### 13. Golden test de la derivación               OK: tests verdes (7 passed)
 ### RESULTADO: PASS
 ```
 

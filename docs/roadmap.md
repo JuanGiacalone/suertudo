@@ -66,7 +66,7 @@ Los PRs encadenados se apilan así: `PR-1` (base) → `PR-2` (apila sobre `PR-1`
 
 **Criterio de salida:** `GET /v1/health` responde 200, un usuario puede registrarse por magic link y obtener un token, y el CI está verde en los tres stacks.
 
-> **Estado:** el spike `spikes/iii-health` ya validó el engine, el worker `http` del registro, un worker Rust propio y la ruta HTTP completa, **sin KVM**. También fijó las versiones de iii (engine 0.24.6 + SDK 0.24.6) y entregó el golden test de la derivación commit–reveal. Ver [`spike-iii-health.md`](./spike-iii-health.md) para el porqué, la mecánica y los hallazgos. Queda por verificar la ruta de colas: `TSK-F0-06`.
+> **Estado:** el spike `spikes/iii-health` ya validó el engine, los workers del registro (`http`, `queue`, `cron`), un worker Rust propio, la ruta HTTP completa, **la ruta de colas y cron completa** y **los dos transportes de cola**, **sin KVM**. También fijó las versiones de iii (engine 0.24.6 + SDK 0.24.6), decidió el transporte de producción (`builtin`, `ADR-013`) y entregó el golden test de la derivación commit–reveal. Ver [`spike-iii-health.md`](./spike-iii-health.md) para el porqué, la mecánica y los hallazgos.
 
 ---
 
@@ -185,23 +185,33 @@ README.md
 
 ### `TSK-F0-06` — Cola y cron de iii (path sin verificar)
 
-**Épica:** E0.6 · **Depende de:** `TSK-F0-02` · **Esfuerzo:** 1 d
+**Épica:** E0.6 · **Depende de:** `TSK-F0-02` · **Esfuerzo:** 1 d · **Estado: COMPLETADA**
 
 **Contexto:** el spike `spikes/iii-health` verificó el engine, los triggers `http` y el registro de funciones, pero **no** la ruta de colas. El engine registra un warning explícito: `trigger type durable:subscriber is not registered ... If this persists, the queue worker is missing`. `draws::execute_draw` y `notifications::dispatch` dependen de esa ruta, así que hay que probarla antes de construir encima.
 
-**Archivos:** `spikes/iii-health/verify.sh` (extender), `infra/docker-compose.yml` (RabbitMQ)
+**Archivos:** `spikes/iii-health/verify.sh` (extender), `spikes/iii-health/src/queue_probe.rs` (nuevo), `docs/api-contract.md` §7.3
 
 **Criterios de aceptación:**
-- [ ] RabbitMQ levanta por docker compose y el worker `queue` del registro alcanza estado `ready`.
-- [ ] Un mensaje encolado con `TriggerAction::Enqueue { queue: "..." }` es consumido por un suscriptor.
-- [ ] Un consumidor que falla reintenta 3 veces con backoff y después va a la DLQ.
-- [ ] `engine::queue::topic_stats` muestra la profundidad y la DLQ vacía.
-- [ ] Un trigger `cron` de 1 minuto se dispara efectivamente.
-- [ ] `engine::queue::dlq_messages` lista un mensaje dead-lettered y `redrive` lo reprocesa.
-- [ ] Todo el stack sigue levantando **sin KVM**.
-- [ ] `verify.sh` queda como el smoke test del CI, con teardown por nombre de proceso exacto.
+- [x] El worker `queue` del registro alcanza estado `ready` y provee `durable:subscriber` y `engine::queue::*`.
+- [x] Un mensaje publicado con `iii::durable::publish` llega a su suscriptor.
+- [x] Un mensaje encolado con `TriggerAction::Enqueue { queue }` es consumido por la función destino.
+- [x] Un consumidor que falla reintenta 3 veces con backoff y después va a la DLQ.
+- [x] `engine::queue::dlq_topics` y `engine::queue::dlq_messages` muestran el mensaje muerto.
+- [x] `iii::queue::redrive` reprocesa el mensaje; `iii::queue::discard_message` lo descarta.
+- [x] Un trigger `cron` se dispara efectivamente (contador de ticks).
+- [x] Todo el stack sigue levantando **sin KVM**.
+- [x] `verify.sh` queda como el smoke test del CI, con teardown por nombre de proceso exacto.
+- [x] El adaptador `rabbitmq` se verificó contra un broker real y dio lugar a `ADR-013`.
 
-**Verificación:** `unshare -rm ./spikes/iii-health/verify.sh` → `RESULTADO: PASS`
+**Verificación:** `unshare -rm ./spikes/iii-health/verify.sh` → `RESULTADO: PASS` (13 secciones)
+
+**Hallazgos que cambiaron los docs:**
+- **El engine no incluye ningún tipo de trigger de cola ni de cron.** Cada uno necesita su worker del registro: `http`, `queue` y `cron`. Sin ellos, el trigger queda `PENDING` para siempre.
+- **`TriggerAction::Enqueue` sí funciona en el engine 0.24.6** (el corte `QueueEnqueuer` está presente). La cola tiene que definirse antes con `queue::define`, y su schema es estricto: `type` solo admite `standard` o `fifo`, `fifo` exige `message_group_field`, y `function_id` **no** es parte de la config (viaja con el mensaje).
+- **El worker `cron` del registro tiene el mismo nombre de proceso que el cron del sistema** (`/usr/sbin/cron`). Un `pkill -x cron` mata el scheduler del SO. El teardown matchea por ruta de ejecutable.
+- **RabbitMQ queda como decisión de transporte pendiente**: el adaptador `builtin` (default) cubre reintentos, DLQ y redrive sin broker externo, pero el adaptador `rabbitmq` no está verificado en este entorno.
+
+**Pendiente:** cerrado. La decisión de transporte quedó tomada en [`ADR-013`](./architecture.md): **`builtin`**, sin broker externo, porque en RabbitMQ la API de DLQ de iii no puede direccionar la DLQ por función y los mensajes muertos quedan inaccesibles. Los dos transportes están verificados y el script acepta `QUEUE_ADAPTER=builtin|rabbitmq`.
 
 ---
 
@@ -608,7 +618,7 @@ Backlog abierto, priorizado por evidencia del uso real.
 
 | Fase | Épicas | Tareas detalladas | Esfuerzo | Riesgo principal |
 |---|---|---|---|---|
-| 0 — Cimientos | 6 | 6 | ~7,5 d | La ruta de colas, sin verificar (`TSK-F0-06`) |
+| 0 — Cimientos | 7 | 7 | ~8,5 d | La reserva transaccional (`TSK-F1-12`) |
 | 1 — MVP vertical | 10 | 25 | ~42 d | La reserva transaccional (`TSK-F1-12`) |
 | 2 — Crecimiento | 10 | por detallar | ~30 d | Cobro de la suscripción |
 | 3 — Expansión | 8 | por detallar | ~40 d+ | Dependencia de terceros (lotería, CRM) |

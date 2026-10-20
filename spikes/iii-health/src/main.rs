@@ -39,7 +39,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         trigger_namespace: None,
     })?;
 
-    eprintln!("iii-health-spike registered health::check on {url}");
+    iii_health_spike::queue_probe::register(&worker)?;
+
+    eprintln!("iii-health-spike registered health::check and queue probes on {url}");
     std::thread::park();
     Ok(())
 }

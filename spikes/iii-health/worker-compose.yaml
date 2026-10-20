@@ -6,3 +6,11 @@ containers:
   http:
     worker: package://api.workers.iii.dev/http
     version: "0.22.7"
+  # added by compose::add
+  queue:
+    worker: package://api.workers.iii.dev/queue
+    version: "0.21.22"
+  # added by compose::add
+  cron:
+    worker: package://api.workers.iii.dev/cron
+    version: "0.21.26"

@@ -1,13 +1,14 @@
 # Spike: iii health
 
 Purpose: prove — before writing the monorepo — that the iii stack for Suertudo
-works on a host **without KVM**, and that the commit–reveal derivation formula
-is reproducible by a third party.
+works on a host **without KVM**, that the commit–reveal derivation formula
+is reproducible by a third party, and that the queue and cron path works.
 
-This is the answer to the two risks that could have sunk Fase 0:
-`R1` (SDK in release candidate) and `R2` (workers need `/dev/kvm`).
+This is the answer to the risks that could have sunk Fase 0: `R1` (SDK in
+release candidate), `R2` (workers need `/dev/kvm`) and the queue path that
+`draws::execute_draw` and `notifications::dispatch` depend on.
 
-**Status: PASS.** Both risks are resolved. See [Findings](#findings).
+**Status: PASS.** All three are resolved. See [Findings](#findings).
 
 > **Por qué existe este spike, cómo funciona mecánicamente y qué hay que
 > recordar para futuros cambios:** [`docs/spike-iii-health.md`](../../docs/spike-iii-health.md).
@@ -23,6 +24,9 @@ This is the answer to the two risks that could have sunk Fase 0:
 
 # Force the no-KVM path: mask /dev/kvm in a private mount namespace
 unshare -rm ./spikes/iii-health/verify.sh
+
+# Test the rabbitmq transport instead (needs a broker on 127.0.0.1:5672)
+QUEUE_ADAPTER=rabbitmq unshare -rm ./spikes/iii-health/verify.sh
 ```
 
 The script is idempotent: it cleans up every process it starts, so it can run
@@ -35,6 +39,7 @@ twice in a row.
 | `iii` engine | 0.24.6 | `curl -fsSL https://install.iii.dev/iii/main/install.sh \| sh` |
 | Rust | 1.99.1 stable | `curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs \| sh -s -- -y` |
 | `iii-sdk` (Rust) | **0.24.6** | Pinned. See Finding 3. |
+| Registry workers | `http` 0.22.7, `queue` 0.21.22, `cron` 0.21.26 | Pulled by `compose::add` |
 
 ---
 
@@ -45,12 +50,17 @@ twice in a row.
 | 0 | No leftover iii process holds the namespace | Guard, fails fast with a clear message |
 | 1 | `/dev/kvm` state, reported in hex (`a,e8` = real KVM) | Informational |
 | 2 | Engine starts and listens on `ws://127.0.0.1:49134` | PASS |
-| 3 | Registry `http` worker v0.22.7 reaches state `ready` | PASS |
+| 3 | Registry workers `http`, `queue`, `cron` reach state `ready` | PASS |
 | 4 | A Rust worker registers a function and an `http` trigger | PASS |
 | 5 | `GET /v1/health` → `200` through the engine | PASS |
 | 6 | `health::check` callable directly through the engine | PASS |
 | 7 | No `iii-worker` process: no microVM was booted | PASS |
-| 8 | Golden test of the derivation formula | PASS (7/7) |
+| 8 | A published message reaches its subscriber | PASS |
+| 9 | A named function queue accepts `TriggerAction::Enqueue` | PASS |
+| 10 | A failing consumer retries 3 times, then dead-letters | PASS |
+| 11 | The DLQ can be listed, redriven and discarded | PASS |
+| 12 | A cron trigger actually fires | PASS |
+| 13 | Golden test of the derivation formula | PASS (7/7) |
 
 ---
 
@@ -68,17 +78,28 @@ This is what `ADR-011` assumed, now verified. The CI pipeline does not need
 
 ### 2. A leftover worker blocks the next run — operational trap
 
-The registry `http` worker **reconnects to the engine on its own** after a
-drop. If one survives a run, the next `compose::up` fails with:
+The registry workers (`http`, `queue`, `cron`) **reconnect to the engine on
+their own** after a drop. If one survives a run, the next `compose::up` fails
+with:
 
 ```
 CONTAINER_NAME_TAKEN: a worker named 'http' is already registered in namespace 'spike'
 ```
 
-The worker's process name is `http` (the package binary), not `iii-*`.
-`verify.sh` kills it explicitly in its cleanup trap.
+Three details that cost time:
 
-**Consequence for CI:** the smoke test must clean up by process name, or it
+- Their **process name is the package name** (`http`, `queue`, `cron`), not
+  `iii-*`. And `cron` **collides with the system scheduler** (`/usr/sbin/cron`):
+  a blanket `pkill -x cron` kills the machine's cron. `verify.sh` therefore
+  identifies registry workers by their **executable path** under
+  `~/.iii/compose/packages/`, never by name.
+- Linux truncates process names to 15 characters, so the spike worker is
+  `iii-health-spik`, not `iii-health-spike`. `pkill -x` with the long name
+  matches nothing, silently, and the stale worker keeps serving.
+- `compose::add` **does not restart** a worker that is already declared in the
+  YAML: it only edits the file. `compose::up` is what reconciles the project.
+
+**Consequence for CI:** the smoke test must clean up by executable path, or it
 will pass locally and fail on the second run. `architecture.md` §9.2 needs this
 detail.
 
@@ -139,21 +160,61 @@ values had been written by hand instead of computed. That is the exact failure
 mode the golden test exists to catch, and it is why the values are now derived
 from an independent implementation.
 
+### 5. The engine ships no queue or cron trigger type
+
+Neither `durable:subscriber` nor `cron` is built into the engine 0.24.6. Each
+needs its own registry worker:
+
+| Trigger type | Registry worker | Version |
+|---|---|---|
+| `http` | `http` | 0.22.7 |
+| `durable:subscriber` | `queue` | 0.21.22 |
+| `cron` | `cron` | 0.21.26 |
+
+Without them the trigger stays `PENDING` forever, and the engine says so:
+
+```
+[WARN] iii::trigger Trigger ... was NOT activated: trigger type cron is not registered.
+If this persists, the cron worker is missing — run:
+iii trigger -n <compose-daemon-namespace> compose::add worker=cron
+```
+
+`draws::close_due_raffles` and `draws::execute_draw` depend on `cron`. A
+backend missing the worker **never draws**, and the symptom is a raffle that
+never closes, not an error.
+
+### 6. `TriggerAction::Enqueue` works, but the queue must exist first
+
+The `queue` worker docs warn that `TriggerAction::Enqueue` needs an engine
+that routes named enqueue actions through `engine::queue::enqueue`. **The
+0.24.6 engine has that cut.** Verified: enqueueing returns a
+`messageReceiptId` and the target function receives the message.
+
+The named queue has to be defined first, and its schema is strict:
+
+| Trap | Error |
+|---|---|
+| `type: concurrent` | `queue 'X' type must be either 'standard' or 'fifo'` |
+| `type: fifo` without `message_group_field` | `queue 'X' with type 'fifo' requires message_group_field` |
+| `function_id` inside the config | `unknown field 'function_id', expected one of 'max_retries', 'concurrency', ...` |
+
+**The target function travels with the message, not with the queue.** A named
+queue defines the transport; each enqueue carries its `function_id`.
+
 ---
 
 ## What this spike does not cover
 
-- Postgres, Redis, RabbitMQ and the `queue` worker. The queue path is what
-  `notifications` and `draws` depend on, and it is **not** verified here.
-- The `durable:subscriber` trigger type (the engine logs a warning that it is
-  missing until the `queue` worker is added).
-- Cron triggers.
+- Postgres and Redis.
 - `iii-worker` binary workers and the `bundle` kind, which do need a VM.
 - Auth, RBAC middleware and namespaces beyond a single one.
+- Crash behaviour mid-retry (what happens to in-flight messages if the queue
+  worker dies).
+- The upstream iii fix `MOT-3904` for RabbitMQ DLQ addressing.
 
-**Next step:** `TSK-F0-03` (schema) and `TSK-F0-04` (identity) can start, but
-the queue path should be proven before building `draws` and `notifications` on
-top of it. Suggest a `TSK-F0-06` for the queue.
+**Next step:** `TSK-F0-01` (monorepo skeleton), `TSK-F0-03` (schema) and
+`TSK-F0-04` (identity) can start. The production queue transport is decided:
+`builtin` (`ADR-013`).
 
 ---
 

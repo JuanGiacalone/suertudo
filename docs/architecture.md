@@ -421,7 +421,9 @@ LLM (probabilístico) → JSON Schema → anclas → contraste → copy → vers
 
 **Consecuencias:** el `iii.worker.yaml` se mantiene en el repo (documenta el runtime y las dependencias) pero **no es obligatorio** para que un worker funcione. El CI no necesita KVM.
 
-**Trampa operativa (medida en el spike):** el worker `http` del registro **se reconecta solo al engine** después de una caída. Si sobrevive a una corrida, la siguiente falla con `CONTAINER_NAME_TAKEN`. Su nombre de proceso es `http`, no `iii-*`. El teardown tiene que matarlo por nombre exacto con `pkill -x`. Ver [`spike-iii-health.md`](./spike-iii-health.md) §5.4.
+**Trampa operativa (medida en el spike):** los workers del registro (`http`, `queue`, `cron`) **se reconectan solos al engine** después de una caída. Si sobreviven a una corrida, la siguiente falla con `CONTAINER_NAME_TAKEN`. Su nombre de proceso es el del paquete (`http`, `queue`, `cron`), y **`cron` colisiona con el scheduler del sistema** (`/usr/sbin/cron`): un `pkill -x cron` mata el cron de la máquina. El teardown tiene que identificarlos por su **ruta de ejecutable** bajo `~/.iii/compose/packages/`, nunca por nombre. Ver [`spike-iii-health.md`](./spike-iii-health.md) §5.8.
+
+**Los tipos de trigger no vienen con el engine.** `http`, `durable:subscriber` y `cron` son workers del registro separados (`http` 0.22.7, `queue` 0.21.22, `cron` 0.21.26). Sin ellos, el trigger queda `PENDING` para siempre y el engine lo avisa en el log. `worker-compose.yaml` tiene que declarar los tres. Ver [`spike-iii-health.md`](./spike-iii-health.md) §5.6.
 
 ---
 
@@ -434,6 +436,39 @@ LLM (probabilístico) → JSON Schema → anclas → contraste → copy → vers
 **Decisión:** el motor iii escucha solo en la red interna. La API HTTP es el único componente con exposure pública. El `worker-manager` de iii (listeners RBAC) se usa para las conexiones de workers, con autenticación.
 
 **Consecuencias:** ningún cliente puede invocar una función interna arbitrariamente. El vector de ataque público es la API, que tiene su propia capa de auth, validación y rate limit.
+
+### ADR-013 — El transporte de la cola es `builtin`, no RabbitMQ
+
+**Estado:** Aceptado · **Medido en el spike `spikes/iii-health`**
+
+**Contexto:** el worker `queue` de iii ofrece tres transportes: `builtin` (in-process, file-backed, default), `redis` (pub/sub, sin DLQ ni reintentos) y `rabbitmq` (completo, con broker externo). La decisión importa porque de ella depende si el equipo puede **operar** los mensajes que fallaron.
+
+**Medición.** Los dos transportes se verificaron con el mismo script (`QUEUE_ADAPTER=builtin|rabbitmq unshare -rm ./spikes/iii-health/verify.sh`):
+
+| Operación | `builtin` | `rabbitmq` |
+|---|---|---|
+| Publicar y consumir | ✅ | ✅ |
+| Named queue con `TriggerAction::Enqueue` | ✅ | ✅ |
+| 3 reintentos con backoff y envío a DLQ | ✅ | ✅ |
+| `engine::queue::dlq_messages` (listar la DLQ) | ✅ ve el mensaje | ❌ devuelve `[]` |
+| `engine::queue::dlq_topics` | ✅ | ❌ devuelve `[]` |
+| `engine::queue::topic_stats` → `dlq_depth` | ✅ correcto | ❌ reporta `0` **mintiendo** |
+| `iii::queue::redrive` (reprocesar) | ✅ | ❌ `NOT_FOUND: no queue 'iii.spike-fail.dlq'` |
+| `iii::queue::discard_message` | ✅ | ❌ (misma causa que el redrive) |
+
+**Causa raíz:** en RabbitMQ los reintentos escriben en la DLQ **por función** (`iii.{topic}.{function_id}@{ns}.dlq`), pero la API de DLQ de iii direcciona el **topic desnudo** (`iii.{topic}.dlq`). El mensaje queda en el broker y es **inalcanzable desde iii**: nadie puede verlo, reprocesarlo ni descartarlo sin usar la API de administración de RabbitMQ a mano.
+
+**Decisión:** el transporte de producción es **`builtin`**.
+
+**Consecuencias:**
+- La DLQ es operable con la API de iii: listar, reprocesar y descartar funcionan.
+- **No hace falta un broker externo.** Un servicio menos que operar, un menos que puede caerse. La cola persiste en disco (`file_based`) y sobrevive a reinicios.
+- El worker `queue` es de un solo proceso. Suficiente para el volumen de Suertudo: notificaciones, exports y ejecuciones de sorteo.
+- Si en el futuro hace falta escalar el worker de cola horizontalmente, el cambio de adaptador es un cambio de configuración en caliente: *"Changing the adapter config hot-swaps the transport and restarts every consumer"*. La ruta de código no cambia.
+
+**Condición de reevaluación:** cuando el volumen justifique varios workers de cola consumiendo en paralelo, **y** se acepte que la DLQ se opere contra la API de RabbitMQ en lugar de la de iii.
+
+**Nota de la doc de iii:** la propia documentación reconoce el problema y lo remite a un ticket upstream (`MOT-3904`): *"On the rabbitmq transport this makes DLQ browse/redrive against a subscriber topic 404 ... Upstream engine fix tracked as MOT-3904"*. Cuando ese fix llegue, la comparación hay que repetirla.
 
 ---
 
@@ -859,3 +894,4 @@ El motor levanta sin KVM porque no provisions workers: los tests levantan sus wo
 | ADR-010 | Sin pagos del participante | Aceptado |
 | ADR-011 | Workers como procesos, sin KVM | Aceptado |
 | ADR-012 | Motor iii no expuesto a internet | Aceptado |
+| ADR-013 | Transporte de cola `builtin`, no RabbitMQ | Aceptado |
