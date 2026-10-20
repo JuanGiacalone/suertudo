@@ -9,6 +9,10 @@ This is the answer to the two risks that could have sunk Fase 0:
 
 **Status: PASS.** Both risks are resolved. See [Findings](#findings).
 
+> **Por qué existe este spike, cómo funciona mecánicamente y qué hay que
+> recordar para futuros cambios:** [`docs/spike-iii-health.md`](../../docs/spike-iii-health.md).
+> Este README es el manual operativo; aquel documento es el rationale.
+
 ---
 
 ## Run it

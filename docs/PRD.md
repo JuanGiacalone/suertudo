@@ -709,6 +709,7 @@ Fases con criterio de salida. El detalle ejecutable está en [`roadmap.md`](./ro
 
 | Documento | Contenido |
 |---|---|
+| [`spike-iii-health.md`](./spike-iii-health.md) | Por qué se midió el stack de iii, cómo funciona y qué hay que recordar |
 | [`data-model.md`](./data-model.md) | Esquema relacional, índices, máquina de estados, migraciones |
 | [`api-contract.md`](./api-contract.md) | Endpoints HTTP, funciones iii, payloads, errores, idempotencia |
 | [`ai-spec.md`](./ai-spec.md) | Prompt, JSON Schema, guardarraíles, evals, costo |

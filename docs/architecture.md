@@ -202,7 +202,7 @@ suertudo/
 
 ### ADR-002 — iii es el orquestador, no el contrato
 
-**Estado:** Aceptado
+**Estado:** Aceptado · **Verificado por el spike `spikes/iii-health`** · Ver [`spike-iii-health.md`](./spike-iii-health.md)
 
 **Contexto:** El SDK de Rust de iii está en **release candidate** (`0.25.0-rc.4`). Un RC puede romper compatibilidad entre versiones.
 
@@ -216,6 +216,8 @@ Cliente → HTTPS → API HTTP (contrato estable) → [worker iii] → Dominio �
 - Cambiar de orquestador (o sacarlo) es reescribir `handlers.rs`, no el producto.
 - Los tests de dominio corren sin motor, sin red y en milisegundos.
 - Se pierde una capacidad: invocar funciones de un worker a otro se hace por `trigger`, que sí es API de iii. Se aísla en una capa `ports::orchestrator` con una implementación `iii::Orchestrator` y una `in_process::Orchestrator` para tests.
+
+**Evidencia empírica (spike):** el SDK `0.25.0-rc.4` **compila** contra el engine `0.24.6` y registra funciones sin error, pero su registro de trigger `http` es **rechazado** y queda en `PENDING`: la ruta nunca existe. Es un fallo **silencioso** — `engine::workers::list` muestra el worker como sano. Por eso el smoke test del CI asserta una **ruta respondiendo 200**, no que un worker se haya registrado. Ver [`spike-iii-health.md`](./spike-iii-health.md) §5.2.
 
 **Alternativas descartadas:** usar iii como contrato público (expone el motor a internet y ata el producto a un RC); Axum puro sin iii (descarta la orquestación y las colas que el usuario pidió explícitamente).
 
@@ -411,7 +413,7 @@ LLM (probabilístico) → JSON Schema → anclas → contraste → copy → vers
 
 **Hecho verificado (documentación de iii):** *"Any process that uses an iii SDK, calls `registerWorker()`, and connects to a iii instance is a worker, and behaves identically whether iii started it or not."* El manifiesto `iii.worker.yaml` solo importa si iii provisions el worker.
 
-**Verificado empíricamente (spike):** el worker `http` del registro es `Type: binary` y corre como proceso del host. El spike levanta el stack completo dentro de un namespace de mounts con `/dev/kvm` enmascarado y comprueba que ningún proceso `iii-worker` llega a existir.
+**Verificado empíricamente (spike):** el worker `http` del registro es `Type: binary` y corre como proceso del host. El spike levanta el stack completo dentro de un namespace de mounts con `/dev/kvm` enmascarado y comprueba que ningún proceso `iii-worker` llega a existir. Ver [`spike-iii-health.md`](./spike-iii-health.md) §5.1.
 
 **Decisión:**
 - **Desarrollo y CI:** los workers corren como procesos locales (`cargo run`), conectando al motor por WebSocket. Sin microVM, sin KVM.
@@ -419,7 +421,7 @@ LLM (probabilístico) → JSON Schema → anclas → contraste → copy → vers
 
 **Consecuencias:** el `iii.worker.yaml` se mantiene en el repo (documenta el runtime y las dependencias) pero **no es obligatorio** para que un worker funcione. El CI no necesita KVM.
 
-**Trampa operativa (medida en el spike):** el worker `http` del registro **se reconecta solo al engine** después de una caída. Si sobrevive a una corrida, la siguiente falla con `CONTAINER_NAME_TAKEN`. Su nombre de proceso es `http`, no `iii-*`. El teardown tiene que matarlo por nombre exacto.
+**Trampa operativa (medida en el spike):** el worker `http` del registro **se reconecta solo al engine** después de una caída. Si sobrevive a una corrida, la siguiente falla con `CONTAINER_NAME_TAKEN`. Su nombre de proceso es `http`, no `iii-*`. El teardown tiene que matarlo por nombre exacto con `pkill -x`. Ver [`spike-iii-health.md`](./spike-iii-health.md) §5.4.
 
 ---
 

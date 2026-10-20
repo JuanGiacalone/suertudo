@@ -66,7 +66,7 @@ Los PRs encadenados se apilan así: `PR-1` (base) → `PR-2` (apila sobre `PR-1`
 
 **Criterio de salida:** `GET /v1/health` responde 200, un usuario puede registrarse por magic link y obtener un token, y el CI está verde en los tres stacks.
 
-> **Estado:** el spike `spikes/iii-health` ya validó el engine, el worker `http` del registro, un worker Rust propio y la ruta HTTP completa, **sin KVM**. También fijó las versiones de iii (engine 0.24.6 + SDK 0.24.6) y entregó el golden test de la derivación commit–reveal. Ver `spikes/iii-health/README.md`. Queda por verificar la ruta de colas: `TSK-F0-06`.
+> **Estado:** el spike `spikes/iii-health` ya validó el engine, el worker `http` del registro, un worker Rust propio y la ruta HTTP completa, **sin KVM**. También fijó las versiones de iii (engine 0.24.6 + SDK 0.24.6) y entregó el golden test de la derivación commit–reveal. Ver [`spike-iii-health.md`](./spike-iii-health.md) para el porqué, la mecánica y los hallazgos. Queda por verificar la ruta de colas: `TSK-F0-06`.
 
 ---
 
