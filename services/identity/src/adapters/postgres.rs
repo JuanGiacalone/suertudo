@@ -734,15 +734,24 @@ impl TokenRepository for PostgresTokenRepository {
         let id = id.to_string();
         let user_id = user_id.to_string();
         Box::pin(async move {
+            let participant = parse_id(&user_id)?;
+            let link = parse_id(&id)?;
             // The link is bound to the participant that won it. The write
-            // goes through the function of the schema: the participant is
-            // not authenticated yet.
-            let bound: bool = sqlx::query_scalar("SELECT bind_magic_link_user($1, $2)")
-                .bind(parse_id(&id)?)
-                .bind(parse_id(&user_id)?)
-                .fetch_one(&*pool)
-                .await
-                .map_err(storage_error)?;
+            // goes through the function of the schema, and the function binds
+            // the caller: the link is the credential, and the credential
+            // belongs to the participant of the context.
+            let bound: bool = with_tenant(&pool, TenantContext::user(participant), move |tx| {
+                Box::pin(async move {
+                    let bound: bool = sqlx::query_scalar("SELECT bind_magic_link_user($1, $2)")
+                        .bind(link)
+                        .bind(participant)
+                        .fetch_one(&mut **tx)
+                        .await
+                        .map_err(storage_error)?;
+                    Ok::<_, StorageError>(bound)
+                })
+            })
+            .await?;
             if !bound {
                 return Err(StorageError::Missing(format!(
                     "the link {id} was not consumed"

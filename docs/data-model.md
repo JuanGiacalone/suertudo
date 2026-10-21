@@ -723,7 +723,7 @@ CREATE TABLE token_families (
 
 El outbox es el patrón de *transactional outbox* de `ADR-002` y su payload lleva datos de tenant. **Sin una columna que diga de quién es el evento, el aislamiento no se podía ni expresar.** La columna es nullable: los eventos de plataforma no pertenecen a un negocio.
 
-### 3.24 Cinco hechos de Postgres que cambiaron el diseño
+### 3.24 Seis hechos de Postgres que cambiaron el diseño
 
 Los tres aparecieron al implementar el esquema y los tres se comportan de forma distinta a la intuición.
 
@@ -755,6 +755,12 @@ $$;
 ```
 
 `current_business_id()` y `current_user_id()` tienen que ignorar el marcador: el sistema no es un tenant.
+
+#### Un sexto hecho, sobre los `RAISE EXCEPTION` sin `ERRCODE`
+
+Un `RAISE EXCEPTION` sin `ERRCODE` usa el SQLSTATE por defecto, `P0001`. Un rechazo con `P0001` no lo traduce nadie, así que **el rechazo se convierte en un `500`**: el cliente recibe "error interno" en lugar de "no tenés permiso".
+
+Ahora **cada** `RAISE EXCEPTION` de la base tiene un SQLSTATE del catálogo de §3.25, y hay un test que recorre `pg_proc` y falla si encuentra uno sin `ERRCODE`. Es el test que impide que la clase vuelva.
 
 #### Un cuarto hecho, sobre el `UPDATE`
 
@@ -805,6 +811,7 @@ Una tabla con `business_id` solo la escribe el dueño de la fila o la plataforma
 | `apply_reservation_counters(ticket_id)` | **Recalcula** los contadores del sorteo desde la verdad | `0032` |
 | `anonymise_user_tickets(user_id)` | Anonimiza los tickets de un participante | `0020` |
 | `anonymise_user_devices(user_id)` | Anonimiza los dispositivos de un participante | `0029` |
+| `change_user_password(user_id, hash)` | **Todavía no existe.** `email` y `password_hash` son columnas de plataforma congeladas para el participante, así que el cambio de contraseña necesita una función de este tipo. | — |
 
 **`apply_reservation_counters` recalcula, no incrementa.** Un contador que se recalcula desde la verdad no puede desviarse y es idempotente por construcción; uno que se incrementa puede ser movido por cualquiera que pueda llamar a la función.
 
@@ -1071,6 +1078,20 @@ WHERE raffle_id = $1 AND status <> 'cancelled';
 0024_published_raffle_tickets.sql  -- un ticket solo existe en un sorteo publicado
 0025_participant_cancellation.sql -- FR-PA-07: cancelar y liberar los números
 0026_explicit_system_context.sql  -- marcador explícito del contexto de sistema
+0027_tenant_bound_write_policies.sql -- toda escritura atada al dueño de la fila
+0028_tenant_functions.sql         -- las funciones que escriben una fila de tenant
+0029_push_devices_rls.sql         -- RLS de push_devices + anonymise_user_devices()
+0030_refresh_family_alive_trigger.sql -- el trigger de la familia, SECURITY DEFINER
+0031_ticket_limits_and_cancellation.sql -- el límite por participante y la cancelación
+0032_apply_reservation_counters.sql -- los contadores se recalculan, no se incrementan
+0033_ticket_cancellation_anonymisation.sql
+0034_notifications_delete.sql     -- la notificación no la borra el participante
+0035_anonymise_user_tickets_void.sql
+0036_refusal_sqlstates.sql        -- cada rechazo de la base tiene un SQLSTATE mapeado
+0037_user_platform_columns.sql    -- columnas de plataforma congeladas para el participante
+0038_push_device_ownership.sql    -- un token de dispositivo no se roba
+0039_bind_magic_link_user.sql     -- el enlace se ata a su dueño y a su correo
+0040_raffle_counters_immutable.sql -- los contadores los escribe la base
 ```
 
 `0001` a `0014` son el esquema inicial. Las de `0015` en adelante son las correcciones que impuso la verificación independiente: políticas de escritura, integridad entre negocio y sorteo, muerte durable de una familia de refresh, y el marcador del contexto de sistema.
@@ -1097,6 +1118,8 @@ La API setea `app.business_id` y `app.user_id` en cada transacción (`SET LOCAL`
 > Las únicas dos escrituras que un participante puede hacer sobre una fila de otro dueño son las dos que el producto le concede, y las dos están acotadas por un trigger: **cancelar su propio ticket** (`FR-PA-07`) y **marcar como leída su propia notificación**.
 >
 > `audit_log` sigue sin `UPDATE` ni `DELETE` para el rol de la aplicación: eso lo garantiza el trigger append-only, no la política.
+>
+> `users` tiene una excepción en el trigger de columnas congeladas: **la baja**. Se reconoce cuando las tres columnas se mueven juntas (`status` a `deleted`, `deleted_at` puesto, `email` a `deleted+<id>@suertudo.invalid`). Un movimiento parcial se rechaza.
 
 ---
 

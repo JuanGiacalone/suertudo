@@ -315,6 +315,8 @@ These are not folklore. Each one was hit and fixed.
 | A write policy with `OR user_id = current_user_id()` on a table that also has `business_id` | The branch is not bound to the business: a participant writes into another tenant's rows | Bind every write policy to the owner of the row, and route the legitimate paths through a `SECURITY DEFINER` function |
 | A `SECURITY DEFINER` function that does not bind the caller | It is an unbounded cross-tenant write | Check `current_user_id()` inside the function, or refuse |
 | A `SECURITY DEFINER` function that increments a counter | It drifts from the truth and it is not idempotent | Recompute the counter from the truth |
+| A `RAISE EXCEPTION` without `ERRCODE` | The refusal becomes `P0001` and nobody translates it: the client gets a `500` | Every refusal carries a mapped SQLSTATE, and a test scans `pg_proc` for the ones that do not |
+| A participant can write the platform columns of its own row | It can clear its own moderation or resurrect a deleted account | Freeze them in a trigger, with the exception the product grants |
 
 ---
 
