@@ -79,12 +79,23 @@ pub enum ConfigError {
     /// The sender of development writes the codes of the users in the log.
     ///
     /// The code of a verification travels by SMS: a sender that writes it
-    /// in the log of the worker hands it to whoever reads the log. Outside
-    /// development, the worker refuses to start with it.
+    /// in the log of the worker hands it to whoever reads the log. In
+    /// production there is no exception: nobody deploys a service that
+    /// writes the codes of its users in the log.
     #[error(
-        "the SMS sender of development writes the codes of the users in the log and that is only allowed in development"
+        "the SMS sender of development writes the codes of the users in the log and that is not allowed in production"
     )]
-    DevSmsOutsideDevelopment,
+    DevSmsInProduction,
+    /// The sender of development in staging, without the consent.
+    ///
+    /// Staging may run with it, but it has to be asked for: the default
+    /// of `SMS_PROVIDER` is the sender of development, and a deployment
+    /// that forgets the variable must not start writing codes in the log
+    /// without having said so.
+    #[error(
+        "the SMS sender of development writes the codes of the users in the log: in staging it needs DEV_SMS_SENDER=true"
+    )]
+    DevSmsNeedsExplicitConsent,
 }
 
 /// The configuration of the worker.
@@ -152,14 +163,28 @@ impl Config {
         }
 
         // The SMS provider. The only one that exists writes the message to
-        // the log, and it cannot run outside development: nobody deploys a
-        // service that writes the codes of its users in the log.
+        // the log, and nobody deploys a service that writes the codes of
+        // its users in the log.
+        //
+        // In production there is no exception. Staging may run with it,
+        // but it has to be asked for with DEV_SMS_SENDER: the default of
+        // SMS_PROVIDER is the sender of development, and a deployment that
+        // forgets the variable must not start logging codes without
+        // having said so.
         let sms_provider = match vars("SMS_PROVIDER").as_deref() {
             None | Some("") | Some("logging") => SmsProvider::Logging,
             Some(other) => return Err(ConfigError::UnknownSmsProvider(other.to_string())),
         };
-        if sms_provider == SmsProvider::Logging && environment != Environment::Development {
-            return Err(ConfigError::DevSmsOutsideDevelopment);
+        if sms_provider == SmsProvider::Logging {
+            match environment {
+                Environment::Production => return Err(ConfigError::DevSmsInProduction),
+                Environment::Staging => {
+                    if !is_truthy(vars("DEV_SMS_SENDER").as_deref()) {
+                        return Err(ConfigError::DevSmsNeedsExplicitConsent);
+                    }
+                }
+                Environment::Development => {}
+            }
         }
 
         let pool_max_connections = vars("DATABASE_MAX_CONNECTIONS")

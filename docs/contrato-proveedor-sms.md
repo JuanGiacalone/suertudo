@@ -146,6 +146,7 @@ pub enum SmsProvider {
 | Variable | Valores | Defecto |
 |---|---|---|
 | `SMS_PROVIDER` | `logging` (hoy), el nombre del proveedor real (a definir) | `logging` |
+| `DEV_SMS_SENDER` | `true` | `false` — en staging habilita el emisor de log |
 
 **Un valor desconocido es un error de arranque**, no un defaults silencioso:
 
@@ -155,22 +156,41 @@ ConfigError::UnknownSmsProvider("twilio")
 
 ### 4.2 El chequeo de arranque
 
+El emisor de desarrollo **es el default** de `SMS_PROVIDER`, así que la regla depende del entorno:
+
+| Entorno | ¿El emisor de desarrollo? | Condición |
+|---|---|---|
+| `development` | ✅ siempre | — |
+| `staging` | ✅ **con opt-in explícito** | `DEV_SMS_SENDER=true` |
+| `production` | ❌ **nunca** | Sin excepción |
+
+Los dos rechazos son fallos de arranque, no advertencias:
+
 ```rust
-ConfigError::DevSmsOutsideDevelopment
+ConfigError::DevSmsInProduction
+// "the SMS sender of development writes the codes of the users in the log
+//  and that is not allowed in production"
+
+ConfigError::DevSmsNeedsExplicitConsent
+// "the SMS sender of development writes the codes of the users in the log:
+//  in staging it needs DEV_SMS_SENDER=true"
 ```
 
-> "the SMS sender of development writes the codes of the users in the log and that is only allowed in development"
+**Por qué staging necesita el opt-in y no simplemente "no lo rompe":** el default de `SMS_PROVIDER` es el emisor de desarrollo. Si staging lo admitiera sin más, un despliegue que **olvidara la variable** empezaría a escribir códigos en el log **sin haberlo decidido**. Con el opt-in, hay que decirlo: es una línea en el manifiesto del despliegue, y quien la escribe sabe lo que hace.
 
-El chequeo es **un fallo de arranque, no una advertencia**, y ocurre en la configuración, donde ya se leen el resto de los secretos.
+**Por qué production no tiene excepción:** nadie despliega un servicio que escribe los códigos de sus usuarios en el log. No hay un caso legítimo en el que valga la pena.
 
-**El caso que hay que decidir antes del despliegue:** ¿el despliegue de *staging* tiene que poder arrancar con el emisor de log?
+**El aviso de arranque.** Cuando el emisor de desarrollo está en uso, el worker lo dice con un `warn` en el log, nombrando el entorno:
 
-| Opción | Consecuencia |
-|---|---|
-| **Staging exige el proveedor real** (lo que hay hoy) | Staging no se despliega hasta que el proveedor esté. Es lo seguro. |
-| **Staging acepta el emisor de log** | Staging despliega antes, y los códigos de los usuarios de prueba quedan en el log de staging. Aceptable si los números de prueba no son reales. |
+```
+the SMS sender of development is in use: the codes of the device verifications go to the log of the worker
+```
 
-La decisión es del despliegue, no del código. Si cambia, el cambio es una línea en `services/identity/src/config.rs` y un test.
+**El magic link es otra cosa.** El token del magic link viaja **en la respuesta de la API**, no a un log, y ese chequeo sigue siendo estricto: `DEV_MAGIC_LINK` sólo se acepta en `development`. La diferencia es de gravedad: un log lo lee quien tiene acceso al log; una respuesta de API la ve el cliente.
+
+**Lo que esto cambia para el despliegue de staging:** puede arrancar con el emisor de log, de modo que el flujo de la toma de control **se puede probar de punta a punta antes de que exista el proveedor**. Quien pruebe el flujo saca el código del log del worker. Los números de prueba tienen que ser de prueba: el código de un número real acaba en el log de staging.
+
+**Lo que sigue bloqueado:** el despliegue de **producción** sigue necesitando un proveedor real. `TSK-F0-11` no se cierra con esto.
 
 ### 4.3 Las credenciales
 

@@ -214,7 +214,9 @@ README.md
 
 **Épica:** E0.11 · **Depende de:** `TSK-F0-10` · **Esfuerzo:** 0,5 d
 
-**Contexto:** el flujo de toma de control de un dispositivo está construido contra un puerto, y el único emisor que existe escribe el código en el log. El worker se niega a arrancar fuera de development con ese emisor, así que **el despliegue de staging y producción está bloqueado hasta que exista un proveedor real**.
+**Contexto:** el flujo de toma de control de un dispositivo está construido contra un puerto, y el único emisor que existe escribe el código en el log.
+
+**El despliegue de staging ya no está bloqueado:** el emisor de desarrollo se acepta en staging con el opt-in explícito `DEV_SMS_SENDER=true`, así que el flujo se puede probar de punta a punta antes de que exista el proveedor. **El de producción sigue bloqueado**, y sin excepción: nadie despliega un servicio que escribe los códigos de sus usuarios en el log.
 
 **Lo que tiene que cumplir la implementación:**
 
@@ -229,9 +231,9 @@ README.md
 **Criterios de aceptación:**
 - [ ] Hay una implementación real del puerto `SmsSender`.
 - [ ] `SMS_PROVIDER` la selecciona, y sus credenciales vienen del secret manager.
-- [ ] El chequeo de arranque deja de rechazar cuando el proveedor es el real, y sigue rechazando el de desarrollo fuera de development.
+- [ ] El chequeo de arranque deja de rechazar cuando el proveedor es el real. **Sigue rechazando el emisor de desarrollo en producción**, y en staging lo acepta sólo con `DEV_SMS_SENDER=true`.
 - [ ] La distinción entre rechazo permanente y falla temporal está en el código y tiene test.
-- [ ] `docs/architecture.md` §8.3 dice qué hace falta para desplegar la identidad fuera de development.
+- [ ] `docs/architecture.md` §8.3 dice qué hace falta para desplegar la identidad en producción.
 
 ---
 

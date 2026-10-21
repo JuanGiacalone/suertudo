@@ -205,11 +205,29 @@ Todos los tests de aislamiento corren **con el rol de la aplicación**, que no e
 
 | Tarea | Qué es |
 |---|---|
-| [`TSK-F0-11`](./roadmap.md) | El proveedor de SMS real. **Bloquea el despliegue fuera de development.** El contrato está en [`contrato-proveedor-sms.md`](./contrato-proveedor-sms.md). |
+| [`TSK-F0-11`](./roadmap.md) | El proveedor de SMS real. **Bloquea el despliegue de producción.** El contrato está en [`contrato-proveedor-sms.md`](./contrato-proveedor-sms.md). |
 | `TSK-F0-09` | El rol de aplicación en el despliegue necesita `GRANT SELECT ON device_verifications` y `EXECUTE` en las cinco funciones. |
 | Fase 1 | `release_user_devices` devuelve **cuántos** dispositivos liberó, no **cuáles**: el worker no puede desregistrarlos de FCM o APNs. Cuando exista la integración con el proveedor de push, hará falta una segunda función que devuelva los tokens. |
 
-### 7.1 Una decisión que quedó tomada y conviene revisar
+### 7.1 En qué entornos se puede probar el flujo
+
+El emisor de desarrollo —el único que existe— **es el default** de `SMS_PROVIDER`, así que la regla depende del entorno:
+
+| Entorno | ¿El emisor de desarrollo? | Condición |
+|---|---|---|
+| `development` | ✅ siempre | — |
+| `staging` | ✅ con opt-in explícito | `DEV_SMS_SENDER=true` |
+| `production` | ❌ nunca | Sin excepción |
+
+**Staging puede arrancar con el emisor de log**, con un opt-in explícito, para poder probar el flujo de punta a punta **antes** de que exista el proveedor. El opt-in no es un detalle: el default de `SMS_PROVIDER` es el emisor de desarrollo, y un despliegue que olvide la variable no debe empezar a loguear códigos sin haberlo decidido.
+
+**Producción no tiene excepción.** Ahí el flujo de la toma de control no se puede probar hasta que exista el proveedor real.
+
+Cuando el emisor de desarrollo está en uso, el worker lo dice con un `warn` en el arranque, nombrando el entorno.
+
+> El token del magic link es **otra cosa**: viaja en la respuesta de la API, no a un log, y su chequeo sigue siendo estricto — `DEV_MAGIC_LINK` sólo en `development`. Un log lo lee quien tiene acceso al log; una respuesta la ve el cliente.
+
+### 7.2 Una decisión que quedó tomada y conviene revisar
 
 **Un dueño sin teléfono en ficha no se puede verificar**, así que el token se queda donde está y el reclamante recibe `409 DEVICE_OWNER_UNVERIFIABLE`. No hay canal alternativo.
 

@@ -9,7 +9,7 @@
 //! rotation are decided here and not by waiting (AGENTS.md §8).
 
 use suertudo_identity::adapters::Argon2PasswordHasher;
-use suertudo_identity::config::{Config, ConfigError, Environment};
+use suertudo_identity::config::{Config, ConfigError, Environment, SmsProvider};
 use suertudo_identity::domain::profile::{is_valid_phone, validate_device, validate_patch};
 use suertudo_identity::domain::session::{
     MagicLinkDecision, RefreshDecision, decide_magic_link, decide_refresh, default_display_name,
@@ -175,7 +175,66 @@ fn the_worker_refuses_to_start_in_production_with_a_development_sender() {
     ]))
     .unwrap_err();
 
-    assert_eq!(error, ConfigError::DevSmsOutsideDevelopment);
+    assert_eq!(error, ConfigError::DevSmsInProduction);
+}
+
+#[test]
+fn the_development_sender_in_staging_needs_the_explicit_consent() {
+    // The default of SMS_PROVIDER is the sender of development, so a
+    // deployment that forgets the variable must not start writing the
+    // codes in the log without having said so.
+    let error = Config::from_vars(vars(&[
+        ("ENV", "staging"),
+        ("DATABASE_URL", "postgres://localhost/suertudo"),
+        ("JWT_SECRET", ACCESS_SECRET),
+        ("JWT_REFRESH_SECRET", REFRESH_SECRET),
+    ]))
+    .unwrap_err();
+
+    assert_eq!(error, ConfigError::DevSmsNeedsExplicitConsent);
+}
+
+#[test]
+fn the_development_sender_starts_in_staging_with_the_explicit_consent() {
+    let config = Config::from_vars(vars(&[
+        ("ENV", "staging"),
+        ("DEV_SMS_SENDER", "true"),
+        ("DATABASE_URL", "postgres://localhost/suertudo"),
+        ("JWT_SECRET", ACCESS_SECRET),
+        ("JWT_REFRESH_SECRET", REFRESH_SECRET),
+    ]))
+    .expect("staging may run with the sender of development when it is asked for");
+
+    assert_eq!(config.sms_provider, SmsProvider::Logging);
+    assert_eq!(config.environment, Environment::Staging);
+}
+
+#[test]
+fn the_explicit_consent_does_not_open_production() {
+    // The consent of staging is not a way around production.
+    let error = Config::from_vars(vars(&[
+        ("ENV", "production"),
+        ("DEV_SMS_SENDER", "true"),
+        ("DATABASE_URL", "postgres://localhost/suertudo"),
+        ("JWT_SECRET", ACCESS_SECRET),
+        ("JWT_REFRESH_SECRET", REFRESH_SECRET),
+    ]))
+    .unwrap_err();
+
+    assert_eq!(error, ConfigError::DevSmsInProduction);
+}
+
+#[test]
+fn the_development_sender_starts_in_development_without_asking_for_it() {
+    let config = Config::from_vars(vars(&[
+        ("ENV", "development"),
+        ("DATABASE_URL", "postgres://localhost/suertudo"),
+        ("JWT_SECRET", ACCESS_SECRET),
+        ("JWT_REFRESH_SECRET", REFRESH_SECRET),
+    ]))
+    .expect("development may run with the sender of development");
+
+    assert_eq!(config.sms_provider, SmsProvider::Logging);
 }
 
 #[test]

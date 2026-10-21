@@ -47,10 +47,19 @@ async fn main() -> Result<(), anyhow::Error> {
     ));
 
     // The provider of the SMS is not decided yet: the only implementation
-    // that exists writes the message to the log, and the configuration
-    // refuses to start the worker with it outside development.
+    // that exists writes the message to the log. The configuration refuses
+    // to start the worker with it in production, and in staging it needs
+    // the explicit consent of DEV_SMS_SENDER.
     let sms: Arc<dyn suertudo_identity::ports::SmsSender> = match config.sms_provider {
-        suertudo_identity::config::SmsProvider::Logging => Arc::new(LoggingSmsSender),
+        suertudo_identity::config::SmsProvider::Logging => {
+            // Loud, on purpose: the codes of the verifications end up in the
+            // log of the worker, and whoever reads the log can use them.
+            tracing::warn!(
+                environment = %config.environment.as_str(),
+                "the SMS sender of development is in use: the codes of the device verifications go to the log of the worker"
+            );
+            Arc::new(LoggingSmsSender)
+        }
     };
 
     let service = Arc::new(IdentityService {
