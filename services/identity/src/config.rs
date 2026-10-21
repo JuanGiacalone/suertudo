@@ -31,6 +31,25 @@ impl Environment {
     }
 }
 
+/// The provider of the SMS.
+///
+/// The provider is not decided yet: the only implementation that exists
+/// writes the message to the log, and it is a development one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SmsProvider {
+    /// The sender of development: it writes the message to the log.
+    Logging,
+}
+
+impl SmsProvider {
+    /// The name of the provider, as it appears in `SMS_PROVIDER`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SmsProvider::Logging => "logging",
+        }
+    }
+}
+
 /// A configuration that cannot be used.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ConfigError {
@@ -54,6 +73,18 @@ pub enum ConfigError {
         "the magic link is returned to the client in the response and that is only allowed in development"
     )]
     DevMagicLinkOutsideDevelopment,
+    /// The SMS provider is not one of the known ones.
+    #[error("SMS_PROVIDER is '{0}' and it is not a known provider")]
+    UnknownSmsProvider(String),
+    /// The sender of development writes the codes of the users in the log.
+    ///
+    /// The code of a verification travels by SMS: a sender that writes it
+    /// in the log of the worker hands it to whoever reads the log. Outside
+    /// development, the worker refuses to start with it.
+    #[error(
+        "the SMS sender of development writes the codes of the users in the log and that is only allowed in development"
+    )]
+    DevSmsOutsideDevelopment,
 }
 
 /// The configuration of the worker.
@@ -65,6 +96,8 @@ pub struct Config {
     pub jwt_refresh_secret: String,
     /// Whether the token of a magic link travels in the response.
     pub dev_magic_link: bool,
+    /// The provider of the SMS.
+    pub sms_provider: SmsProvider,
     pub pool_max_connections: u32,
 }
 
@@ -118,6 +151,17 @@ impl Config {
             return Err(ConfigError::DevMagicLinkOutsideDevelopment);
         }
 
+        // The SMS provider. The only one that exists writes the message to
+        // the log, and it cannot run outside development: nobody deploys a
+        // service that writes the codes of its users in the log.
+        let sms_provider = match vars("SMS_PROVIDER").as_deref() {
+            None | Some("") | Some("logging") => SmsProvider::Logging,
+            Some(other) => return Err(ConfigError::UnknownSmsProvider(other.to_string())),
+        };
+        if sms_provider == SmsProvider::Logging && environment != Environment::Development {
+            return Err(ConfigError::DevSmsOutsideDevelopment);
+        }
+
         let pool_max_connections = vars("DATABASE_MAX_CONNECTIONS")
             .and_then(|value| value.parse::<u32>().ok())
             .unwrap_or(10);
@@ -128,6 +172,7 @@ impl Config {
             jwt_secret,
             jwt_refresh_secret,
             dev_magic_link,
+            sms_provider,
             pool_max_connections,
         })
     }

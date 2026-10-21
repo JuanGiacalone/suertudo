@@ -409,7 +409,7 @@ async fn grant_to_app_role(pool: &PgPool) -> Result<(), Box<dyn Error>> {
                 'ticket_numbers', 'draws', 'prizes', 'theme_versions',
                 'ai_generations', 'notifications', 'consent_records',
                 'validation_codes', 'audit_log', 'auth_tokens', 'token_families',
-                'outbox', 'push_devices'
+                'outbox', 'push_devices', 'device_verifications'
             ]
             LOOP
                 EXECUTE format(

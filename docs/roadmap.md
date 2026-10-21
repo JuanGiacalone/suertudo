@@ -68,7 +68,7 @@ Los PRs encadenados se apilan así: `PR-1` (base) → `PR-2` (apila sobre `PR-1`
 
 > **Estado:** completadas `TSK-F0-01` a `TSK-F0-04` y `TSK-F0-06`. El spike `spikes/iii-health` validó el engine, los workers del registro (`http`, `queue`, `cron`), un worker Rust propio, la ruta HTTP completa, **la ruta de colas y cron completa** y **los dos transportes de cola**, **sin KVM**. También fijó las versiones de iii (engine 0.24.6 + SDK 0.24.6), decidió el transporte de producción (`builtin`, `ADR-013`) y entregó el golden test de la derivación commit–reveal. Ver [`spike-iii-health.md`](./spike-iii-health.md) para el porqué, la mecánica y los hallazgos.
 >
-> **Abiertas:** `TSK-F0-05` (CI), `TSK-F0-07` (rate limits), `TSK-F0-08` (envío real del magic link), `TSK-F0-09` (rol de aplicación y smoke test del backend), `TSK-F0-10` (el token de dispositivo y la clase del error).
+> **Abiertas:** `TSK-F0-05` (CI), `TSK-F0-07` (rate limits), `TSK-F0-08` (envío real del magic link), `TSK-F0-09` (rol de aplicación y smoke test del backend), `TSK-F0-11` (proveedor de SMS, que bloquea el despliegue fuera de development).
 >
 > **Una función de la base falta todavía:** `claim_prize(p_prize_id, p_user_id, p_claim_code)`, sin la cual `FR-DR-08` y `POST /v1/me/prizes/{prize_id}/claim` no tienen camino. La especificación está en `docs/data-model.md` §3.27.
 
@@ -183,24 +183,57 @@ README.md
 
 ### `TSK-F0-10` — El token de dispositivo y la clase del error
 
-**Épica:** E0.10 · **Depende de:** `TSK-F0-04` · **Esfuerzo:** 0,5 d
+**Épica:** E0.10 · **Depende de:** `TSK-F0-04` · **Esfuerzo:** 1 d · **Estado: COMPLETADA**
 
-**Contexto:** el token de un dispositivo push identifica **un teléfono**, no a una persona. Hoy la fila de `push_devices` guarda el `user_id` de quien la registró, y `register_push_device` rechaza con `42501` el token que ya es de otro. El escenario real: la misma persona se da de baja y crea otra cuenta en el mismo teléfono. La cuenta nueva **pierde el push en silencio**, y el error que recibe es `403 RBAC_FORBIDDEN`, que dice "tu rol no alcanza" y no dice nada del teléfono.
+**Contexto:** el token de un dispositivo push identifica **un teléfono**, no a una persona. La fila de `push_devices` guarda el `user_id` de quien la registró, y `register_push_device` rechazaba con `42501` el token que ya era de otro. El escenario real: la misma persona crea una segunda cuenta en el mismo teléfono. La cuenta nueva **perdía el push en silencio**, y el error que recibía era `403 RBAC_FORBIDDEN`, que dice "tu rol no alcanza" y no dice nada del teléfono.
 
-**Decisión de producto pendiente.** Hay dos caminos y la elección es del dominio:
+**Decisión de producto tomada:** cuando el token se repite, se abre un **flujo de verificación por SMS**. El token **no cambia de dueño hasta que alguien verifica**.
 
-| Camino | Qué resuelve | Qué cuesta |
-|---|---|---|
-| **Liberar los dispositivos al cerrar sesión** | La cuenta nueva registra el token sin conflicto | El push de la sesión anterior deja de llegar en cuanto se cierra |
-| **Transferir el token cuando el dueño anterior no tiene sesión viva** | El teléfono pasa a la cuenta nueva y el push sigue llegando | Hay que definir qué es "sesión viva" y probar la carrera |
+**La decisión de seguridad que define el flujo:**
 
-Lo que **no** hay que hacer es volver a permitir que cualquiera re-apunte el token de otro: eso fue el defecto `F-3` y abre el secuestro de notificaciones.
+> El SMS va al teléfono **del dueño actual del token**, no al del que lo reclama. Si fuera al del reclamante, un atacante que copió el token recibiría su propio código y la transferencia funcionaría.
 
 **Criterios de aceptación:**
-- [ ] Está decidido qué pasa con el token de un dispositivo cuando su dueño cierra sesión.
-- [ ] El error es un `409 CONFLICT` con un código propio, no un `403 RBAC_FORBIDDEN`: el cliente tiene que poder explicar qué hacer.
-- [ ] `docs/api-contract.md` §1.4 tiene el código nuevo.
-- [ ] El token de otro sigue sin poder robarse.
+- [x] Un token libre se registra sin verificación: `201`.
+- [x] Un token de otro participante abre una verificación: `202` con el id, el estado y el vencimiento.
+- [x] El SMS va al teléfono del dueño actual del token. Hay un test que lo prueba.
+- [x] El código son seis dígitos, vive diez minutos y admite cinco intentos. Sólo se guarda su SHA-256.
+- [x] El código correcto transfiere el dispositivo; el incorrecto responde `400 DEVICE_CODE_INVALID` y cuenta el intento.
+- [x] Una verificación vencida responde `409 DEVICE_VERIFICATION_EXPIRED`.
+- [x] Un dueño sin teléfono en ficha responde `409 DEVICE_OWNER_UNVERIFIABLE` y el token no se mueve.
+- [x] El cierre de sesión libera los dispositivos: un dispositivo es de una sesión, no de una persona.
+- [x] El worker **se niega a arrancar** fuera de development con el emisor de desarrollo, que escribe el código en el log.
+
+**Lo que quedó para la Fase 1:** el proveedor real de SMS. El flujo está construido contra un puerto (`SmsSender`), así que integrarlo es escribir una implementación. Ver `TSK-F0-11`.
+
+**Riesgo:** el token de un dispositivo es una credencial, y ahora se mueve entre participantes después de una verificación por SMS.
+
+---
+
+### `TSK-F0-11` — Proveedor de SMS
+
+**Épica:** E0.11 · **Depende de:** `TSK-F0-10` · **Esfuerzo:** 0,5 d
+
+**Contexto:** el flujo de toma de control de un dispositivo está construido contra un puerto, y el único emisor que existe escribe el código en el log. El worker se niega a arrancar fuera de development con ese emisor, así que **el despliegue de staging y producción está bloqueado hasta que exista un proveedor real**.
+
+**Lo que tiene que cumplir la implementación:**
+
+| # | Garantía |
+|---|---|
+| 1 | **Nunca devuelve `Ok` por un mensaje que no entregó al proveedor.** Un éxito mudo es una verificación que nadie puede confirmar. |
+| 2 | **No registra el cuerpo fuera de development.** El cuerpo lleva el código de una toma de control. |
+| 3 | **Es honesto con los fallos**: un rechazo permanente del proveedor y una falla temporal del canal son errores distintos. Confundirlos hace que el participante espere un código que nunca llega. |
+| 4 | **No reintenta por su cuenta de una forma que duplique el código**: la verificación lleva un código y un hash, y un segundo código invalidaría el primero. |
+| 5 | **Es barata de probar**: el puerto no tiene estado ni I/O propios, así que el harness sustituye un grabador. |
+
+**Criterios de aceptación:**
+- [ ] Hay una implementación real del puerto `SmsSender`.
+- [ ] `SMS_PROVIDER` la selecciona, y sus credenciales vienen del secret manager.
+- [ ] El chequeo de arranque deja de rechazar cuando el proveedor es el real, y sigue rechazando el de desarrollo fuera de development.
+- [ ] La distinción entre rechazo permanente y falla temporal está en el código y tiene test.
+- [ ] `docs/architecture.md` §8.3 dice qué hace falta para desplegar la identidad fuera de development.
+
+---
 
 ---
 
@@ -710,7 +743,7 @@ Backlog abierto, priorizado por evidencia del uso real.
 
 | Fase | Épicas | Tareas detalladas | Esfuerzo | Riesgo principal |
 |---|---|---|---|---|
-| 0 — Cimientos | 10 | 10 | ~11 d | El rol de aplicación sin propiedad del esquema (`TSK-F0-09`) |
+| 0 — Cimientos | 11 | 11 | ~12 d | El proveedor de SMS, que bloquea el despliegue fuera de development (`TSK-F0-11`) |
 | 1 — MVP vertical | 10 | 25 | ~42 d | La reserva transaccional (`TSK-F1-12`) |
 | 2 — Crecimiento | 10 | por detallar | ~30 d | Cobro de la suscripción |
 | 3 — Expansión | 8 | por detallar | ~40 d+ | Dependencia de terceros (lotería, CRM) |

@@ -19,8 +19,8 @@ use uuid::Uuid;
 
 /// The SQLSTATEs the domain maps to a code of the catalogue
 /// (`docs/data-model.md` §3.25).
-const MAPPED_SQLSTATES: [&str; 9] = [
-    "PT001", "PT002", "PT003", "PT004", "PT005", "42501", "55000", "23503", "23505",
+const MAPPED_SQLSTATES: [&str; 10] = [
+    "PT001", "PT002", "PT003", "PT004", "PT005", "PT006", "42501", "55000", "23503", "23505",
 ];
 
 /// The SQLSTATE of an error, when it comes from the database.

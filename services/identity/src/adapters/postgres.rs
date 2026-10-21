@@ -19,8 +19,8 @@ use uuid::Uuid;
 
 use crate::domain::errors::Refusal;
 use crate::domain::types::{
-    AccountStatus, ConsentScope, ConsentState, Device, NotificationPreferences, ProfilePatch, Role,
-    StoredToken, TokenKind, User,
+    AccountStatus, ConsentScope, ConsentState, Device, DeviceRequest, DeviceVerification,
+    NotificationPreferences, ProfilePatch, Role, StoredToken, TokenKind, User,
 };
 use crate::ports::{
     BoxFuture, ConsentRepository, DeviceRepository, StorageError, TokenRepository, UserRepository,
@@ -40,6 +40,8 @@ const RAFFLE_NOT_OPEN: &str = "PT002";
 const RAFFLE_CLOSED: &str = "PT003";
 const NUMBER_TAKEN: &str = "PT004";
 const TICKET_SIZE_OUT_OF_RANGE: &str = "PT005";
+/// The verification of the takeover of a device expired.
+const DEVICE_VERIFICATION_EXPIRED: &str = "PT006";
 
 /// The refusal of the database that a SQLSTATE names.
 ///
@@ -56,6 +58,7 @@ pub fn refusal_of(code: &str) -> Option<Refusal> {
         RAFFLE_CLOSED => Some(Refusal::RaffleClosed),
         NUMBER_TAKEN => Some(Refusal::NumberTaken),
         TICKET_SIZE_OUT_OF_RANGE => Some(Refusal::TicketSizeOutOfRange),
+        DEVICE_VERIFICATION_EXPIRED => Some(Refusal::DeviceVerificationExpired),
         INSUFFICIENT_PRIVILEGE => Some(Refusal::RbacForbidden),
         _ => None,
     }
@@ -968,6 +971,16 @@ impl TokenRepository for PostgresTokenRepository {
     }
 }
 
+/// The columns of a verification of a device takeover.
+#[derive(Debug, FromRow)]
+struct VerificationRow {
+    id: Uuid,
+    status: String,
+    attempts: i32,
+    expires_at: chrono::DateTime<chrono::Utc>,
+    device_token: String,
+}
+
 /// The columns of a push device.
 #[derive(Debug, FromRow)]
 struct DeviceRow {
@@ -992,50 +1005,144 @@ impl PostgresDeviceRepository {
 }
 
 impl DeviceRepository for PostgresDeviceRepository {
-    fn register(
+    fn request_takeover(
         &self,
         user_id: &str,
         platform: &str,
         token: &str,
         app_version: Option<&str>,
-    ) -> BoxFuture<'static, Result<Device, StorageError>> {
+        code_hash: &str,
+        expires_at: i64,
+    ) -> BoxFuture<'static, Result<DeviceRequest, StorageError>> {
         let pool = self.pool.clone();
         let user_id = user_id.to_string();
         let platform = platform.to_string();
         let token = token.to_string();
         let app_version = app_version.map(str::to_string);
+        let code_hash = code_hash.to_string();
         Box::pin(async move {
             let user_uuid = parse_id(&user_id)?;
-            // The registration of a device is the function of the schema:
-            // the token of the device is a credential and the row belongs to
-            // its owner (`docs/api-contract.md` §3.8).
-            // The function of the schema checks who calls it: the device
-            // belongs to the participant of the context.
-            let id: Uuid = with_tenant(&pool, TenantContext::user(user_uuid), move |tx| {
+            let hash = hex::decode(&code_hash)
+                .map_err(|_| StorageError::Backend("the code hash is not hexadecimal".into()))?;
+            // The token travels twice: to the function and to the read of
+            // the device that it registered.
+            let token_for_the_read = token.clone();
+            let token_for_the_message = token_for_the_read.clone();
+
+            // The function of the schema registers the token when it is free
+            // and opens the verification when it belongs to somebody else.
+            // It binds the caller: the device is the one of the participant
+            // of the context.
+            let verification = with_tenant(&pool, TenantContext::user(user_uuid), move |tx| {
                 Box::pin(async move {
-                    let id: Uuid =
-                        sqlx::query_scalar("SELECT register_push_device($1, $2, $3, $4)")
-                            .bind(user_uuid)
-                            .bind(&platform)
-                            .bind(&token)
-                            .bind(&app_version)
-                            .fetch_one(&mut **tx)
-                            .await
-                            .map_err(storage_error)?;
-                    Ok::<_, StorageError>(id)
+                    let verification: Option<Uuid> = sqlx::query_scalar(
+                        "SELECT request_device_takeover($1, $2, $3, $4, $5, to_timestamp($6))",
+                    )
+                    .bind(&token)
+                    .bind(&platform)
+                    .bind(&app_version)
+                    .bind(user_uuid)
+                    .bind(hash)
+                    .bind(expires_at as f64)
+                    .fetch_one(&mut **tx)
+                    .await
+                    .map_err(storage_error)?;
+                    Ok::<_, StorageError>(verification)
                 })
             })
             .await?;
 
-            // The row comes back with the context of its owner: the token of
-            // a device is a credential and nobody else sees it.
-            let row = with_tenant(&pool, TenantContext::user(user_uuid), move |tx| {
+            let Some(verification_id) = verification else {
+                // The token ended up being the one of the participant: the
+                // device is registered and there is nothing to verify.
+                let row = with_tenant(&pool, TenantContext::user(user_uuid), move |tx| {
+                    Box::pin(async move {
+                        let row = sqlx::query_as::<_, DeviceRow>(
+                            "SELECT id, platform, token, app_version, active FROM push_devices \
+                             WHERE user_id = $1 AND token = $2",
+                        )
+                        .bind(user_uuid)
+                        .bind(&token_for_the_read)
+                        .fetch_optional(&mut **tx)
+                        .await
+                        .map_err(storage_error)?;
+                        Ok::<_, StorageError>(row)
+                    })
+                })
+                .await?;
+
+                let Some(row) = row else {
+                    return Err(StorageError::Missing(format!(
+                        "the device {token_for_the_message} was not registered"
+                    )));
+                };
+
+                return Ok(DeviceRequest::Registered(Device {
+                    id: row.id.to_string(),
+                    platform: row.platform,
+                    token: row.token,
+                    app_version: row.app_version,
+                    active: row.active,
+                }));
+            };
+
+            Ok(DeviceRequest::Pending {
+                verification_id: verification_id.to_string(),
+            })
+        })
+    }
+
+    fn takeover_phone(
+        &self,
+        verification_id: &str,
+        user_id: &str,
+    ) -> BoxFuture<'static, Result<Option<String>, StorageError>> {
+        let pool = self.pool.clone();
+        let verification_id = verification_id.to_string();
+        let user_id = user_id.to_string();
+        Box::pin(async move {
+            let participant = parse_id(&user_id)?;
+            let verification = parse_id(&verification_id)?;
+            // The phone is the one of the participant that currently owns
+            // the token, and only the claimant of the verification may ask
+            // for it: the function of the schema binds the caller.
+            let phone = with_tenant(&pool, TenantContext::user(participant), move |tx| {
                 Box::pin(async move {
-                    let row = sqlx::query_as::<_, DeviceRow>(
-                        "SELECT id, platform, token, app_version, active FROM push_devices \
-                         WHERE id = $1",
+                    let phone: Option<String> =
+                        sqlx::query_scalar("SELECT device_takeover_phone($1, $2)")
+                            .bind(verification)
+                            .bind(participant)
+                            .fetch_one(&mut **tx)
+                            .await
+                            .map_err(storage_error)?;
+                    Ok::<_, StorageError>(phone)
+                })
+            })
+            .await?;
+            Ok(phone)
+        })
+    }
+
+    fn verification(
+        &self,
+        verification_id: &str,
+        user_id: &str,
+    ) -> BoxFuture<'static, Result<Option<DeviceVerification>, StorageError>> {
+        let pool = self.pool.clone();
+        let verification_id = verification_id.to_string();
+        let user_id = user_id.to_string();
+        Box::pin(async move {
+            let participant = parse_id(&user_id)?;
+            let verification = parse_id(&verification_id)?;
+            // The participant sees the verifications it is part of and
+            // nothing else.
+            let row = with_tenant(&pool, TenantContext::user(participant), move |tx| {
+                Box::pin(async move {
+                    let row = sqlx::query_as::<_, VerificationRow>(
+                        "SELECT id, status, attempts, expires_at, device_token \
+                         FROM device_verifications WHERE id = $1",
                     )
-                    .bind(id)
+                    .bind(verification)
                     .fetch_optional(&mut **tx)
                     .await
                     .map_err(storage_error)?;
@@ -1044,19 +1151,94 @@ impl DeviceRepository for PostgresDeviceRepository {
             })
             .await?;
 
-            let Some(row) = row else {
-                return Err(StorageError::Missing(format!(
-                    "the device {id} was not registered"
-                )));
-            };
+            Ok(row.map(|row| DeviceVerification {
+                id: row.id.to_string(),
+                status: row.status,
+                attempts: row.attempts,
+                expires_at: row.expires_at.timestamp(),
+                device_token: row.device_token,
+            }))
+        })
+    }
 
-            Ok(Device {
+    fn confirm_takeover(
+        &self,
+        verification_id: &str,
+        user_id: &str,
+        code: &str,
+    ) -> BoxFuture<'static, Result<Option<Device>, StorageError>> {
+        let pool = self.pool.clone();
+        let verification_id = verification_id.to_string();
+        let user_id = user_id.to_string();
+        let code = code.to_string();
+        Box::pin(async move {
+            let participant = parse_id(&user_id)?;
+            let verification = parse_id(&verification_id)?;
+            // The function hashes the code and compares it with the hash of
+            // the row. A wrong code returns `false` and the transaction is
+            // committed: the attempt has to survive the refusal.
+            let device = with_tenant(&pool, TenantContext::user(participant), move |tx| {
+                Box::pin(async move {
+                    let confirmed: bool =
+                        sqlx::query_scalar("SELECT confirm_device_takeover($1, $2, $3)")
+                            .bind(verification)
+                            .bind(participant)
+                            .bind(code.as_bytes())
+                            .fetch_one(&mut **tx)
+                            .await
+                            .map_err(storage_error)?;
+
+                    if !confirmed {
+                        return Ok::<_, StorageError>(None);
+                    }
+
+                    // The token changed owner: the device is the one of the
+                    // claimant now.
+                    let row = sqlx::query_as::<_, DeviceRow>(
+                        "SELECT id, platform, token, app_version, active FROM push_devices \
+                         WHERE user_id = $1 AND token = (SELECT device_token FROM \
+                         device_verifications WHERE id = $2)",
+                    )
+                    .bind(participant)
+                    .bind(verification)
+                    .fetch_optional(&mut **tx)
+                    .await
+                    .map_err(storage_error)?;
+
+                    Ok::<_, StorageError>(row)
+                })
+            })
+            .await?;
+
+            Ok(device.map(|row| Device {
                 id: row.id.to_string(),
                 platform: row.platform,
                 token: row.token,
                 app_version: row.app_version,
                 active: row.active,
+            }))
+        })
+    }
+
+    fn release(&self, user_id: &str) -> BoxFuture<'static, Result<(), StorageError>> {
+        let pool = self.pool.clone();
+        let user_id = user_id.to_string();
+        Box::pin(async move {
+            let participant = parse_id(&user_id)?;
+            // A device belongs to a session, not to a person: the logout
+            // deletes the rows, because a deactivated row would still own
+            // the token.
+            with_tenant(&pool, TenantContext::user(participant), move |tx| {
+                Box::pin(async move {
+                    sqlx::query("SELECT release_user_devices($1)")
+                        .bind(participant)
+                        .execute(&mut **tx)
+                        .await
+                        .map_err(storage_error)?;
+                    Ok::<_, StorageError>(())
+                })
             })
+            .await
         })
     }
 

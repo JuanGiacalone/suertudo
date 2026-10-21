@@ -159,6 +159,25 @@ fn the_magic_link_travels_in_the_response_only_in_development() {
     assert!(config.dev_magic_link);
 }
 
+/// The worker refuses to start in production with the sender of
+/// development.
+///
+/// The sender of development writes the code of the verification in the log
+/// of the worker: nobody deploys a service that writes the codes of its
+/// users in the log.
+#[test]
+fn the_worker_refuses_to_start_in_production_with_a_development_sender() {
+    let error = Config::from_vars(vars(&[
+        ("ENV", "production"),
+        ("DATABASE_URL", "postgres://localhost/suertudo"),
+        ("JWT_SECRET", ACCESS_SECRET),
+        ("JWT_REFRESH_SECRET", REFRESH_SECRET),
+    ]))
+    .unwrap_err();
+
+    assert_eq!(error, ConfigError::DevSmsOutsideDevelopment);
+}
+
 #[test]
 fn the_worker_refuses_to_start_with_the_magic_link_outside_development() {
     let error = Config::from_vars(vars(&[

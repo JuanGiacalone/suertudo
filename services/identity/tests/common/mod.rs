@@ -24,7 +24,9 @@ use suertudo_identity::domain::service::IdentityService;
 use suertudo_identity::domain::types::StoredToken;
 use suertudo_identity::handlers::Deps;
 use suertudo_identity::middleware::SessionResolver;
-use suertudo_identity::ports::{Clock, StorageError, TokenRepository};
+use suertudo_identity::ports::{
+    Clock, SmsError, SmsMessage, SmsSender, StorageError, TokenRepository,
+};
 use tokio::sync::OnceCell;
 
 /// The secret of the access tokens in the tests.
@@ -92,6 +94,57 @@ pub fn deps(pool: &PgPool, clock: Arc<TestClock>, dev_magic_link: bool) -> Arc<D
     )
 }
 
+/// The sender of the tests: it records what the worker sent.
+///
+/// The provider of the SMS is not decided yet, and the flow has to be
+/// able to prove **to whom** the message goes: the recorder is the seam.
+#[derive(Debug, Default)]
+pub struct RecordingSmsSender {
+    sent: std::sync::Mutex<Vec<(String, String)>>,
+}
+
+impl RecordingSmsSender {
+    /// The messages the worker sent, with their recipient.
+    pub fn sent(&self) -> Vec<(String, String)> {
+        self.sent
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
+    }
+
+    /// The recipient of the last message that was sent.
+    pub fn last_recipient(&self) -> Option<String> {
+        self.sent
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .last()
+            .map(|(to, _)| to.clone())
+    }
+
+    /// The body of the last message that was sent.
+    pub fn last_body(&self) -> Option<String> {
+        self.sent
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .last()
+            .map(|(_, body)| body.clone())
+    }
+}
+
+impl SmsSender for RecordingSmsSender {
+    fn send(&self, to: &str, message: &SmsMessage) -> BoxFuture<'_, Result<(), SmsError>> {
+        let recipient = to.to_string();
+        let body = message.body.clone();
+        Box::pin(async move {
+            self.sent
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .push((recipient, body));
+            Ok(())
+        })
+    }
+}
+
 /// The setup of a test.
 ///
 /// The flows of the test run with the role of the application: the role does
@@ -109,6 +162,8 @@ pub struct Harness {
     pub application: PgPool,
     /// The dependencies of the handlers, over the role of the application.
     pub deps: Arc<Deps>,
+    /// The SMS that the worker sent, with its recipient.
+    pub sms: Arc<RecordingSmsSender>,
 }
 
 /// The setup of a test, with the role of the application.
@@ -118,11 +173,19 @@ pub async fn harness(
 ) -> Result<Harness, Box<dyn std::error::Error>> {
     let owner = test_pool().await?;
     let application = app_pool(&owner).await?;
-    let deps = deps(&application, clock, dev_magic_link);
+    let sms = Arc::new(RecordingSmsSender::default());
+    let deps = deps_with_sms(
+        &application,
+        clock,
+        dev_magic_link,
+        Arc::new(PostgresTokenRepository::new(Arc::new(application.clone()))),
+        sms.clone(),
+    );
     Ok(Harness {
         owner,
         application,
         deps,
+        sms,
     })
 }
 
@@ -135,6 +198,24 @@ pub fn deps_with_tokens(
     clock: Arc<TestClock>,
     dev_magic_link: bool,
     tokens: Arc<dyn TokenRepository>,
+) -> Arc<Deps> {
+    deps_with_sms(
+        pool,
+        clock,
+        dev_magic_link,
+        tokens,
+        Arc::new(RecordingSmsSender::default()),
+    )
+}
+
+/// The dependencies of the handlers, with the token store and the SMS
+/// channel of the caller.
+pub fn deps_with_sms(
+    pool: &PgPool,
+    clock: Arc<TestClock>,
+    dev_magic_link: bool,
+    tokens: Arc<dyn TokenRepository>,
+    sms: Arc<RecordingSmsSender>,
 ) -> Arc<Deps> {
     let clock: Arc<dyn Clock> = clock;
     let signer = Arc::new(Hs256TokenSigner::new(
@@ -153,6 +234,7 @@ pub fn deps_with_tokens(
             token_source: Arc::new(RandomTokenSource),
             digest: Arc::new(Sha256Digest),
             signer: signer.clone(),
+            sms,
         }),
         resolver: SessionResolver::new(signer),
         dev_magic_link,

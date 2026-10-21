@@ -47,6 +47,21 @@ pub enum IdentityError {
     #[error("Algo falló de nuestro lado. Probá de nuevo en un rato.")]
     Internal,
 
+    /// The code of the verification of a device is wrong.
+    ///
+    /// The participant is doing the right thing: the code that reached the
+    /// phone is not the one that was typed. It is not a permission error
+    /// (`FR-ID-05`, `TSK-F0-10`).
+    #[error("El código no es correcto. Pedí uno nuevo.")]
+    DeviceCodeInvalid,
+
+    /// The current owner of the device has no phone on file: the takeover
+    /// cannot be verified, so the token stays where it is.
+    #[error(
+        "No podemos verificar el dispositivo: el dueño actual no tiene un teléfono en su ficha."
+    )]
+    DeviceOwnerUnverifiable,
+
     /// A refusal of the database that the catalogue of the contract names.
     ///
     /// The database refuses with a SQLSTATE and a message; the worker
@@ -80,6 +95,8 @@ pub enum Refusal {
     TicketSizeOutOfRange,
     /// The caller is not the owner of the row it tried to write.
     RbacForbidden,
+    /// The verification of the takeover of a device expired.
+    DeviceVerificationExpired,
 }
 
 impl Refusal {
@@ -92,6 +109,7 @@ impl Refusal {
             Refusal::NumberTaken => "NUMBER_TAKEN",
             Refusal::TicketSizeOutOfRange => "TICKET_SIZE_OUT_OF_RANGE",
             Refusal::RbacForbidden => "RBAC_FORBIDDEN",
+            Refusal::DeviceVerificationExpired => "DEVICE_VERIFICATION_EXPIRED",
         }
     }
 
@@ -102,6 +120,7 @@ impl Refusal {
             | Refusal::RaffleNotOpen
             | Refusal::RaffleClosed
             | Refusal::NumberTaken => 409,
+            Refusal::DeviceVerificationExpired => 409,
             Refusal::TicketSizeOutOfRange => 422,
             Refusal::RbacForbidden => 403,
         }
@@ -116,6 +135,9 @@ impl Refusal {
             Refusal::NumberTaken => "Alguno de los números ya está reservado.",
             Refusal::TicketSizeOutOfRange => "La cantidad de números no es la que pide el sorteo.",
             Refusal::RbacForbidden => "Tu rol no alcanza para esta operación.",
+            Refusal::DeviceVerificationExpired => {
+                "La verificación del dispositivo venció. Pedí una nueva."
+            }
         }
     }
 }
@@ -139,6 +161,8 @@ impl IdentityError {
             IdentityError::Forbidden => "FORBIDDEN",
             IdentityError::NotFound => "NOT_FOUND",
             IdentityError::Conflict => "CONFLICT",
+            IdentityError::DeviceCodeInvalid => "DEVICE_CODE_INVALID",
+            IdentityError::DeviceOwnerUnverifiable => "DEVICE_OWNER_UNVERIFIABLE",
             IdentityError::Internal => "INTERNAL_ERROR",
             IdentityError::Refused { refusal, .. } => refusal.code(),
         }
@@ -152,6 +176,8 @@ impl IdentityError {
             IdentityError::Forbidden => 403,
             IdentityError::NotFound => 404,
             IdentityError::Conflict => 409,
+            IdentityError::DeviceCodeInvalid => 400,
+            IdentityError::DeviceOwnerUnverifiable => 409,
             IdentityError::Internal => 500,
             IdentityError::Refused { refusal, .. } => refusal.status(),
         }

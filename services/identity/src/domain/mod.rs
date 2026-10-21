@@ -13,7 +13,7 @@ pub mod types;
 pub use errors::{IdentityError, Refusal};
 pub use service::IdentityService;
 pub use types::{
-    AccessClaims, AccountStatus, ConsentScope, ConsentState, Device, MagicLinkClaims,
-    MagicLinkIssued, NotificationPreferences, ProfilePatch, RefreshClaims, Role, Session,
-    StoredToken, TokenKind, User,
+    AccessClaims, AccountStatus, ConsentScope, ConsentState, Device, DeviceRegistration,
+    DeviceRequest, DeviceVerification, MagicLinkClaims, MagicLinkIssued, NotificationPreferences,
+    ProfilePatch, RefreshClaims, Role, Session, StoredToken, TokenKind, User,
 };

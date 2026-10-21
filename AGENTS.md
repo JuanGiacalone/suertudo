@@ -328,6 +328,8 @@ These are not folklore. Each one was hit and fixed.
 | A participant can write the platform columns of its own row | It can clear its own moderation or resurrect a deleted account | Freeze them in a trigger, with the exception the product grants |
 | A check that only looks for the absence of an error | It cannot tell "everything is fine" from "nothing ran", and it reports PASS | Every check demands the mark of success: a number, a code, a body |
 | A crate inside the workspace directory that is not a member | `cargo` refuses to build it from its own directory | Add it to `members` or to `exclude`; a spike with its own lockfile belongs in `exclude` |
+| A refusal that the database answers with `false` instead of an exception | The transaction is rolled back and the attempt counter is lost with it | A refusal is a result: commit the transaction |
+| The SMS of a verification goes to the participant that claims the device | An attacker who copied the token receives their own code and the transfer succeeds | The SMS goes to the participant that **owns** the device today |
 
 ---
 

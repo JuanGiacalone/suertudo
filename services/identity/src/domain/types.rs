@@ -120,6 +120,53 @@ pub struct Device {
     pub active: bool,
 }
 
+/// The outcome of asking for a device.
+///
+/// A device token is unique in the whole platform: the same phone can open
+/// a second account, and the token of the first one has to be verified
+/// before it moves (`TSK-F0-10`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeviceRequest {
+    /// The device is registered (or reactivated) for the participant.
+    Registered(Device),
+    /// The token belongs to somebody else: a verification is pending and
+    /// the token does not move until it is confirmed.
+    Pending {
+        /// The identifier of the verification.
+        verification_id: String,
+    },
+}
+
+/// The outcome of registering a device.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeviceRegistration {
+    /// The device is registered for the participant.
+    Registered(Device),
+    /// A verification is pending: the token belongs to somebody else and the
+    /// SMS went to the participant that owns it.
+    Pending {
+        /// The identifier of the verification.
+        verification_id: String,
+        /// When the verification expires, in seconds since the Unix epoch.
+        expires_at: i64,
+    },
+}
+
+/// A verification of the takeover of a device.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceVerification {
+    /// The identifier of the verification.
+    pub id: String,
+    /// The state of the verification: `pending`, `confirmed`, `expired`…
+    pub status: String,
+    /// How many times the code was tried.
+    pub attempts: i32,
+    /// When the verification expires, in seconds since the Unix epoch.
+    pub expires_at: i64,
+    /// The token of the device that is being verified.
+    pub device_token: String,
+}
+
 /// The scopes a participant can grant or revoke per business.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConsentScope {

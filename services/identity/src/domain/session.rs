@@ -16,6 +16,23 @@ pub const ACCESS_TOKEN_TTL: i64 = 900;
 /// How long a refresh token is valid: thirty days (`FR-ID-04`).
 pub const REFRESH_TOKEN_TTL: i64 = 30 * 24 * 60 * 60;
 
+/// How many digits the code of a device verification has.
+///
+/// Six digits is what a person can read and type from a phone.
+pub const DEVICE_CODE_DIGITS: usize = 6;
+
+/// How long a device verification lives: ten minutes.
+///
+/// The code travels by SMS and the person has to type it: ten minutes is
+/// enough and short enough for the code to be worth little.
+pub const DEVICE_VERIFICATION_TTL: i64 = 10 * 60;
+
+/// How many times the code of a device verification can be tried.
+///
+/// Five attempts is enough for a person who received the message, and few
+/// enough for a code that is being guessed.
+pub const DEVICE_VERIFICATION_MAX_ATTEMPTS: i32 = 5;
+
 /// What to do with a magic link the client presented.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MagicLinkDecision {

@@ -12,7 +12,9 @@ use iii_sdk::{IIIClient, RegisterFunction};
 use serde_json::{Value, json};
 
 use crate::domain::service::IdentityService;
-use crate::domain::types::{NotificationPreferences, ProfilePatch, Session, User};
+use crate::domain::types::{
+    DeviceRegistration, NotificationPreferences, ProfilePatch, Session, User,
+};
 use crate::http::{Request, accepted, created, failure, ok};
 use crate::middleware::SessionResolver;
 
@@ -123,6 +125,20 @@ pub fn register(worker: &IIIClient, deps: &Arc<Deps>) -> Result<(), iii_sdk::Err
         worker,
         "identity::register_device",
         "/v1/me/devices",
+        "POST",
+    )?;
+
+    register_handler(
+        worker,
+        "identity::confirm_device_takeover",
+        "Confirma la toma de control de un dispositivo con el codigo recibido por SMS",
+        deps,
+        |deps, payload| async move { confirm_device_takeover(&deps, payload).await },
+    );
+    http_trigger(
+        worker,
+        "identity::confirm_device_takeover",
+        "/v1/me/devices/verifications/:verification_id/confirm",
         "POST",
     )?;
 
@@ -359,11 +375,56 @@ pub async fn register_device(deps: &Deps, payload: Value) -> Value {
         .register_device(&context.user_id.to_string(), platform, token, app_version)
         .await
     {
-        Ok(device) => created(json!({
+        // The token was free (or it was already the one of the
+        // participant): the device is registered.
+        Ok(DeviceRegistration::Registered(device)) => created(json!({
             "id": device.id,
             "platform": device.platform,
             "app_version": device.app_version,
             "active": device.active,
+        })),
+        // The token belongs to somebody else: the SMS went to the
+        // participant that owns it, and the token moves only when that one
+        // confirms the code (`TSK-F0-10`).
+        Ok(DeviceRegistration::Pending {
+            verification_id,
+            expires_at,
+        }) => accepted(json!({
+            "verification_id": verification_id,
+            "status": "pending",
+            "expires_at": expires_at,
+        })),
+        Err(error) => failure(&error),
+    }
+}
+
+/// `POST /v1/me/devices/verifications/{id}/confirm`.
+///
+/// The code of the verification. It is the one that the participant read on
+/// the phone of the owner of the token.
+pub async fn confirm_device_takeover(deps: &Deps, payload: Value) -> Value {
+    let context = match deps.resolver.context_from_payload(&payload) {
+        Ok(context) => context,
+        Err(error) => return failure(&error),
+    };
+    let request = Request::parse(&payload);
+
+    let verification_id = request.path_param("verification_id").unwrap_or_default();
+    let code = request.field("code").unwrap_or_default();
+
+    match deps
+        .service
+        .confirm_device_takeover(&context.user_id.to_string(), verification_id, code)
+        .await
+    {
+        Ok(device) => ok(json!({
+            "verified": true,
+            "device": {
+                "id": device.id,
+                "platform": device.platform,
+                "app_version": device.app_version,
+                "active": device.active,
+            },
         })),
         Err(error) => failure(&error),
     }

@@ -12,16 +12,18 @@ use std::sync::Arc;
 use crate::domain::errors::IdentityError;
 use crate::domain::profile::{validate_business_id, validate_device, validate_patch};
 use crate::domain::session::{
-    ACCESS_TOKEN_TTL, MAGIC_LINK_TTL, MagicLinkDecision, REFRESH_TOKEN_TTL, RefreshDecision,
+    ACCESS_TOKEN_TTL, DEVICE_CODE_DIGITS, DEVICE_VERIFICATION_MAX_ATTEMPTS,
+    DEVICE_VERIFICATION_TTL, MAGIC_LINK_TTL, MagicLinkDecision, REFRESH_TOKEN_TTL, RefreshDecision,
     decide_magic_link, decide_refresh, default_display_name, normalise_email,
 };
 use crate::domain::types::{
-    AccessClaims, AccountStatus, ConsentScope, ConsentState, Device, MagicLinkClaims,
-    MagicLinkIssued, ProfilePatch, RefreshClaims, Session, TokenKind, User,
+    AccessClaims, AccountStatus, ConsentScope, ConsentState, Device, DeviceRegistration,
+    DeviceRequest, MagicLinkClaims, MagicLinkIssued, ProfilePatch, RefreshClaims, Session,
+    TokenKind, User,
 };
 use crate::ports::{
-    Clock, ConsentRepository, DeviceRepository, Digest, StorageError, TokenRepository, TokenSigner,
-    TokenSource, UserRepository,
+    Clock, ConsentRepository, DeviceRepository, Digest, SmsError, SmsMessage, SmsSender,
+    StorageError, TokenRepository, TokenSigner, TokenSource, UserRepository,
 };
 
 /// How many times a request for a magic link retries the storage of the
@@ -41,6 +43,9 @@ pub struct IdentityService {
     pub token_source: Arc<dyn TokenSource>,
     pub digest: Arc<dyn Digest>,
     pub signer: Arc<dyn TokenSigner>,
+    /// The SMS channel. The provider is not decided yet: the flow is built
+    /// against the port.
+    pub sms: Arc<dyn SmsSender>,
 }
 
 impl std::fmt::Debug for IdentityService {
@@ -265,6 +270,11 @@ impl IdentityService {
                 self.tokens.revoke_token(&stored.id, &user_id).await?;
             }
         }
+
+        // A device belongs to a session, not to a person: the logout hands
+        // the token back, so that the same phone can open another account
+        // without losing the push (`TSK-F0-10`).
+        self.devices.release(&user_id).await.map_err(storage)?;
         Ok(())
     }
 
@@ -305,18 +315,106 @@ impl IdentityService {
     }
 
     /// Registers a push device.
+    ///
+    /// The token of a device is unique in the whole platform: the same
+    /// phone can open a second account, and the token of the first one is
+    /// not stolen, it is repeated. The repeated token opens a verification
+    /// and the SMS goes to the participant that **currently owns it**: only
+    /// whoever holds that phone can authorise the transfer (`TSK-F0-10`).
     pub async fn register_device(
         &self,
         user_id: &str,
         platform: &str,
         token: &str,
         app_version: Option<&str>,
-    ) -> Result<Device, IdentityError> {
+    ) -> Result<DeviceRegistration, IdentityError> {
         validate_device(platform, token)?;
-        self.devices
-            .register(user_id, platform, token, app_version)
+
+        // The code of the verification: six digits, ten minutes. It travels
+        // as its hash: the plaintext is in the SMS and in the request of the
+        // participant that received it, and nowhere else.
+        let code = self.token_source.next_code(DEVICE_CODE_DIGITS);
+        let code_hash = self.digest.sha256_hex(&code);
+        let expires_at = self.clock.now() + DEVICE_VERIFICATION_TTL;
+
+        let request = self
+            .devices
+            .request_takeover(
+                user_id,
+                platform,
+                token,
+                app_version,
+                &code_hash,
+                expires_at,
+            )
             .await
-            .map_err(storage)
+            .map_err(storage)?;
+
+        match request {
+            DeviceRequest::Registered(device) => Ok(DeviceRegistration::Registered(device)),
+            DeviceRequest::Pending { verification_id } => {
+                // The SMS goes to the participant that currently owns the
+                // token. If it went to the claimant, whoever stole the
+                // string of the token would receive their own code and the
+                // transfer would go through.
+                let phone = self
+                    .devices
+                    .takeover_phone(&verification_id, user_id)
+                    .await
+                    .map_err(storage)?;
+
+                let Some(phone) = phone else {
+                    // The owner has no phone on file: the takeover cannot be
+                    // verified, so the token stays where it is.
+                    return Err(IdentityError::DeviceOwnerUnverifiable);
+                };
+
+                self.sms
+                    .send(&phone, &SmsMessage::new(device_takeover_message(&code)))
+                    .await
+                    .map_err(sms_failure)?;
+
+                Ok(DeviceRegistration::Pending {
+                    verification_id,
+                    expires_at,
+                })
+            }
+        }
+    }
+
+    /// Confirms the takeover of a device with the code that the owner of
+    /// the token received by SMS.
+    pub async fn confirm_device_takeover(
+        &self,
+        user_id: &str,
+        verification_id: &str,
+        code: &str,
+    ) -> Result<Device, IdentityError> {
+        let code = code.trim();
+        if code.len() != DEVICE_CODE_DIGITS || !code.chars().all(|c| c.is_ascii_digit()) {
+            return Err(IdentityError::DeviceCodeInvalid);
+        }
+
+        // Five attempts: the sixth one does not reach the database.
+        if let Some(verification) = self
+            .devices
+            .verification(verification_id, user_id)
+            .await
+            .map_err(storage)?
+            && verification.attempts >= DEVICE_VERIFICATION_MAX_ATTEMPTS
+        {
+            return Err(IdentityError::DeviceCodeInvalid);
+        }
+
+        // The database counts the attempt and commits it: the refusal is a
+        // result, not an error of the transaction.
+        let device = self
+            .devices
+            .confirm_takeover(verification_id, user_id, code)
+            .await
+            .map_err(storage)?;
+
+        device.ok_or(IdentityError::DeviceCodeInvalid)
     }
 
     /// Deactivates a push device of the participant.
@@ -423,6 +521,26 @@ impl IdentityService {
             user: user.clone(),
         })
     }
+}
+
+/// The message of the SMS of a device takeover.
+///
+/// It goes to the participant that currently owns the token, so it has to
+/// make sense for somebody who does not know that they have an account open
+/// on another phone.
+fn device_takeover_message(code: &str) -> String {
+    format!(
+        "Suertudo: alguien está intentando registrar en su cuenta el dispositivo que ya tenés \
+         registrado en otra. Para autorizar el traslado, ingresá el código {code} en la app. \
+         Vence en 10 minutos. Si no reconocés el dispositivo, no hagas nada: el registro no se \
+         mueve sin tu autorización."
+    )
+}
+
+/// The failure of the SMS channel.
+fn sms_failure(err: SmsError) -> IdentityError {
+    tracing::error!(%err, "the SMS of the device takeover did not go out");
+    IdentityError::Internal
 }
 
 /// The failure of a magic link that is not usable.

@@ -25,6 +25,20 @@ impl TokenSource for RandomTokenSource {
     fn next_id(&self) -> String {
         uuid::Uuid::new_v4().to_string()
     }
+
+    fn next_code(&self, digits: usize) -> String {
+        // The rejection sampling keeps the code uniform: a code that is
+        // more likely than the others is a code that can be guessed.
+        // The bound has to fit in the u64: eighteen digits is the limit.
+        let bound = 10u64.pow(digits.clamp(1, 18) as u32);
+        let zone = u64::MAX - (u64::MAX % bound);
+        loop {
+            let value = OsRng.next_u64();
+            if value < zone {
+                return format!("{:0width$}", value % bound, width = digits);
+            }
+        }
+    }
 }
 
 /// The SHA-256 of a token.

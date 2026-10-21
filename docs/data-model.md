@@ -787,6 +787,7 @@ La base rechaza con un código estable, y el worker lo traduce al código del ca
 | `55000` | La familia de refresh está revocada | 401 | `AUTH_REQUIRED` |
 | `23503` | La fila referenciada no existe | 404 | `NOT_FOUND` |
 | `23505` | Violación de unicidad | 409 | `CONFLICT` |
+| `PT006` | La verificación de la toma de control de un dispositivo venció | 409 | `DEVICE_VERIFICATION_EXPIRED` |
 
 **Un rechazo que se convierte en `500` es un rechazo que el cliente no puede manejar.** Por eso el SQLSTATE se traduce antes de llegar a la respuesta, y el mensaje de la base va a `details.reason` mientras el mensaje de la respuesta es el del catálogo, en español.
 
@@ -813,6 +814,11 @@ Una tabla con `business_id` solo la escribe el dueño de la fila o la plataforma
 Los contadores los escribe **la base**: el contexto de sistema o las funciones `SECURITY DEFINER` del esquema. Un tenant que los escriba recibe `42501`. La razón está en `0041`: el trigger tiene que reconocer al contexto de sistema, o un job de la plataforma que recalculara los contadores in situ sería rechazado.
 | `anonymise_user_tickets(user_id)` | Anonimiza los tickets de un participante | `0020` |
 | `anonymise_user_devices(user_id)` | Anonimiza los dispositivos de un participante | `0029` |
+| `request_device_takeover(token, platform, app_version, user_id, code_hash, expires_at)` | Registra el token de dispositivo, o abre la verificación de la toma de control | `0042` |
+| `confirm_device_takeover(verification_id, user_id, code)` | Confirma la verificación con el código recibido por SMS | `0042` |
+| `release_user_devices(user_id)` | Libera los dispositivos de un participante (cierre de sesión) | `0042` |
+| `device_takeover_phone(verification_id, user_id)` | El teléfono del dueño actual del token, para dirigirle el SMS | `0042` |
+| `expire_device_verifications()` | Marca como vencidas las verificaciones pendientes | `0042` |
 | `change_user_password(user_id, hash)` | **Todavía no existe.** `email` y `password_hash` son columnas de plataforma congeladas para el participante, así que el cambio de contraseña necesita una función de este tipo. | — |
 
 **`apply_reservation_counters` recalcula, no incrementa.** Un contador que se recalcula desde la verdad no puede desviarse y es idempotente por construcción; uno que se incrementa puede ser movido por cualquiera que pueda llamar a la función.
@@ -836,6 +842,40 @@ claim_prize(p_prize_id uuid, p_user_id uuid, p_claim_code text) RETURNS void
 | Solo se escribe el reclamo | `status`, `claim_code`, `claimed_at`, `updated_at`. Un trigger deja el resto de la fila intacto y prohíbe cualquier otra transición del participante |
 
 El código de canje lo genera el que llama, igual que `reserve_ticket` recibe `p_code`: la función no inventa el formato.
+
+### 3.28 `device_verifications` — la toma de control de un dispositivo
+
+> **Añadida en la migración `0042_device_takeover.sql`.**
+
+El token de un dispositivo push es **único de forma global** (`push_devices.token`): identifica un teléfono, no a una persona. La misma persona con una segunda cuenta pide un token que ya es de otra, y eso no es un ataque.
+
+La tabla guarda la verificación en curso:
+
+```sql
+CREATE TABLE device_verifications (
+    id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    device_token      text NOT NULL,
+    current_owner_id  uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    claimant_id       uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    code_hash         bytea NOT NULL,
+    status            text NOT NULL DEFAULT 'pending'
+                      CHECK (status IN ('pending','confirmed','expired','refused','cancelled')),
+    attempts          integer NOT NULL DEFAULT 0,
+    expires_at        timestamptz NOT NULL,
+    confirmed_at      timestamptz,
+    created_at        timestamptz NOT NULL DEFAULT now()
+);
+```
+
+| Decisión | Razón |
+|---|---|
+| **El código se guarda hasheado** | El texto claro existe en el SMS y en la petición de quien lo recibió, y en ningún otro lado. |
+| **`current_owner_id` aparte de `claimant_id`** | El SMS va al dueño **actual** del token, no al que lo reclama: si fuera al reclamante, un atacante que copió el token recibiría su propio código. |
+| **La transferencia se ata al dueño registrado** | Una verificación vieja no puede robarle el dispositivo a la cuenta que lo tiene hoy. |
+| **Índice único parcial `(device_token, claimant_id) WHERE status='pending'`** | El flujo no apila verificaciones pendientes del mismo token. Una carrera entre dos reclamantes da un `23505` mapeado. |
+| **Un `false` y no una excepción para el código incorrecto** | Una excepción aborta la transacción y el contador de intentos se va con el rollback. El `false` es un resultado, y la transacción se confirma. |
+
+**Los dispositivos se liberan al cerrar sesión.** Un dispositivo es de una sesión, no de una persona: si no se liberaran, la misma persona con una segunda cuenta perdería el push en silencio. La función **borra** las filas y no las desactiva: una fila desactivada sigue siendo dueña del token, y el `UNIQUE` global no lo liberaría.
 
 ---
 

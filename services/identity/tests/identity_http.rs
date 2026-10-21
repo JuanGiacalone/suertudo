@@ -805,6 +805,402 @@ async fn the_anonymisation_leaves_no_device_token() -> Result<(), Box<dyn std::e
     Ok(())
 }
 
+/// A participant with a session.
+async fn participant(
+    deps: &Arc<suertudo_identity::Deps>,
+) -> Result<(String, String), Box<dyn std::error::Error>> {
+    let token = magic_link(deps, &unique_email()).await?;
+    let session = session(deps, &token).await?;
+    let access = session["access_token"].as_str().unwrap().to_string();
+    let user_id = session["user"]["id"].as_str().unwrap().to_string();
+    Ok((access, user_id))
+}
+
+/// The phone that the participant has on file.
+async fn with_phone(
+    deps: &Arc<suertudo_identity::Deps>,
+    access: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let phone = format!("+5491{:08}", uuid::Uuid::new_v4().as_u128() % 100_000_000);
+    let answer = handlers::update_profile(
+        deps,
+        request_with_token(json!({ "phone_e164": phone }), access),
+    )
+    .await;
+    assert_eq!(status(&answer), 200, "the phone was not saved: {answer}");
+    Ok(phone)
+}
+
+/// The answer of registering a device.
+async fn register_device(
+    deps: &Arc<suertudo_identity::Deps>,
+    access: &str,
+    token: &str,
+) -> serde_json::Value {
+    handlers::register_device(
+        deps,
+        request_with_token(json!({ "platform": "android", "token": token }), access),
+    )
+    .await
+}
+
+/// The answer of confirming a takeover.
+async fn confirm_takeover(
+    deps: &Arc<suertudo_identity::Deps>,
+    access: &str,
+    verification_id: &str,
+    code: &str,
+) -> serde_json::Value {
+    let mut payload = request_with_token(json!({ "code": code }), access);
+    payload["path_params"] = json!({ "verification_id": verification_id });
+    handlers::confirm_device_takeover(deps, payload).await
+}
+
+/// The code of a verification, out of the body of the SMS.
+///
+/// The code is the only run of six digits of the message: the rest of the
+/// numbers of the body are the minutes of the expiry.
+fn code_of(body: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let code = body
+        .split(|c: char| !c.is_ascii_digit())
+        .find(|part| part.len() == 6)
+        .ok_or("the SMS does not carry a code")?;
+    Ok(code.to_string())
+}
+
+/// A device that is free is registered and nothing else happens.
+#[tokio::test]
+async fn a_free_device_is_registered_without_a_verification()
+-> Result<(), Box<dyn std::error::Error>> {
+    let clock = Arc::new(TestClock::new(NOW));
+    let setup = harness(clock, true).await?;
+    let (access, _) = participant(&setup.deps).await?;
+
+    let token = format!("device-{}", uuid::Uuid::new_v4());
+    let answer = register_device(&setup.deps, &access, &token).await;
+    assert_eq!(
+        status(&answer),
+        201,
+        "the device was not registered: {answer}"
+    );
+
+    // No verification and no SMS: there was nothing to verify.
+    assert!(
+        setup.sms.sent().is_empty(),
+        "a free device opened a verification"
+    );
+    let verifications: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM device_verifications WHERE device_token = $1")
+            .bind(&token)
+            .fetch_one(&setup.owner)
+            .await?;
+    assert_eq!(verifications, 0, "a free device opened a verification");
+
+    Ok(())
+}
+
+/// The token of another participant opens a verification.
+#[tokio::test]
+async fn a_repeated_token_opens_a_verification() -> Result<(), Box<dyn std::error::Error>> {
+    let clock = Arc::new(TestClock::new(NOW));
+    let setup = harness(clock, true).await?;
+    let (owner_access, owner_id) = participant(&setup.deps).await?;
+    let _ = with_phone(&setup.deps, &owner_access).await?;
+    let (claimant_access, _) = participant(&setup.deps).await?;
+
+    let token = format!("device-{}", uuid::Uuid::new_v4());
+    let answer = register_device(&setup.deps, &owner_access, &token).await;
+    assert_eq!(status(&answer), 201);
+
+    let answer = register_device(&setup.deps, &claimant_access, &token).await;
+    assert_eq!(status(&answer), 202, "the takeover did not open: {answer}");
+    assert_eq!(data(&answer)["status"], "pending");
+    assert!(
+        !data(&answer)["verification_id"]
+            .as_str()
+            .unwrap_or_default()
+            .is_empty(),
+        "the answer has no verification"
+    );
+    assert!(
+        data(&answer)["expires_at"].as_i64().unwrap_or_default() > NOW,
+        "the answer has no expiry"
+    );
+
+    // And the token did not move: it is still the one of its owner.
+    let owner: uuid::Uuid = sqlx::query_scalar("SELECT user_id FROM push_devices WHERE token = $1")
+        .bind(&token)
+        .fetch_one(&setup.owner)
+        .await?;
+    assert_eq!(
+        owner.to_string(),
+        owner_id,
+        "the token moved before the verification"
+    );
+
+    Ok(())
+}
+
+/// The SMS goes to the owner of the token, and not to the claimant.
+///
+/// This is the security property of the whole flow: if the message went to
+/// the claimant, whoever stole the string of the token would receive their
+/// own code and the transfer would go through.
+#[tokio::test]
+async fn the_sms_goes_to_the_owner_of_the_token_and_not_to_the_claimant()
+-> Result<(), Box<dyn std::error::Error>> {
+    let clock = Arc::new(TestClock::new(NOW));
+    let setup = harness(clock, true).await?;
+    let (owner_access, _) = participant(&setup.deps).await?;
+    let owner_phone = with_phone(&setup.deps, &owner_access).await?;
+
+    let (claimant_access, _) = participant(&setup.deps).await?;
+    let claimant_phone = with_phone(&setup.deps, &claimant_access).await?;
+
+    let token = format!("device-{}", uuid::Uuid::new_v4());
+    let answer = register_device(&setup.deps, &owner_access, &token).await;
+    assert_eq!(status(&answer), 201);
+
+    let answer = register_device(&setup.deps, &claimant_access, &token).await;
+    assert_eq!(status(&answer), 202);
+
+    let recipient = setup.sms.last_recipient().ok_or("no SMS was sent")?;
+    assert_eq!(
+        recipient, owner_phone,
+        "the SMS did not go to the owner of the token"
+    );
+    assert_ne!(recipient, claimant_phone, "the SMS went to the claimant");
+
+    Ok(())
+}
+
+/// The right code moves the token to the claimant.
+#[tokio::test]
+async fn a_correct_code_transfers_the_device() -> Result<(), Box<dyn std::error::Error>> {
+    let clock = Arc::new(TestClock::new(NOW));
+    let setup = harness(clock, true).await?;
+    let (owner_access, _) = participant(&setup.deps).await?;
+    let _ = with_phone(&setup.deps, &owner_access).await?;
+    let (claimant_access, claimant_id) = participant(&setup.deps).await?;
+
+    let token = format!("device-{}", uuid::Uuid::new_v4());
+    let answer = register_device(&setup.deps, &owner_access, &token).await;
+    assert_eq!(status(&answer), 201);
+
+    let answer = register_device(&setup.deps, &claimant_access, &token).await;
+    assert_eq!(status(&answer), 202);
+    let verification_id = data(&answer)["verification_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let code = code_of(&setup.sms.last_body().ok_or("no SMS was sent")?)?;
+    let answer = confirm_takeover(&setup.deps, &claimant_access, &verification_id, &code).await;
+    assert_eq!(status(&answer), 200, "the code was not accepted: {answer}");
+    assert_eq!(data(&answer)["verified"], true);
+
+    // The token moved to the claimant.
+    let owner: uuid::Uuid = sqlx::query_scalar("SELECT user_id FROM push_devices WHERE token = $1")
+        .bind(&token)
+        .fetch_one(&setup.owner)
+        .await?;
+    assert_eq!(owner.to_string(), claimant_id, "the token did not move");
+
+    Ok(())
+}
+
+/// A wrong code is refused with its own code, and the attempt is counted.
+#[tokio::test]
+async fn a_wrong_code_is_refused_with_its_own_code() -> Result<(), Box<dyn std::error::Error>> {
+    let clock = Arc::new(TestClock::new(NOW));
+    let setup = harness(clock, true).await?;
+    let (owner_access, owner_id) = participant(&setup.deps).await?;
+    let _ = with_phone(&setup.deps, &owner_access).await?;
+    let (claimant_access, _) = participant(&setup.deps).await?;
+
+    let token = format!("device-{}", uuid::Uuid::new_v4());
+    let answer = register_device(&setup.deps, &owner_access, &token).await;
+    assert_eq!(status(&answer), 201);
+
+    let answer = register_device(&setup.deps, &claimant_access, &token).await;
+    assert_eq!(status(&answer), 202);
+    let verification_id = data(&answer)["verification_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // The code is wrong: the participant is doing the right thing, and the
+    // answer says so.
+    let answer = confirm_takeover(&setup.deps, &claimant_access, &verification_id, "000000").await;
+    assert_eq!(
+        status(&answer),
+        400,
+        "the wrong code was accepted: {answer}"
+    );
+    assert_eq!(error_code(&answer), "DEVICE_CODE_INVALID");
+
+    // The attempt is counted: the refusal is a result, not an error of the
+    // transaction.
+    let attempts: i32 =
+        sqlx::query_scalar("SELECT attempts FROM device_verifications WHERE id = $1")
+            .bind(uuid::Uuid::parse_str(&verification_id)?)
+            .fetch_one(&setup.owner)
+            .await?;
+    assert_eq!(attempts, 1, "the attempt was not counted");
+
+    // And the token did not move.
+    let owner: uuid::Uuid = sqlx::query_scalar("SELECT user_id FROM push_devices WHERE token = $1")
+        .bind(&token)
+        .fetch_one(&setup.owner)
+        .await?;
+    assert_eq!(
+        owner.to_string(),
+        owner_id,
+        "the token moved with a wrong code"
+    );
+
+    // Five attempts: the sixth one does not reach the database, not even
+    // with the right code.
+    for _ in 0..4 {
+        let answer =
+            confirm_takeover(&setup.deps, &claimant_access, &verification_id, "000000").await;
+        assert_eq!(status(&answer), 400);
+    }
+    let attempts: i32 =
+        sqlx::query_scalar("SELECT attempts FROM device_verifications WHERE id = $1")
+            .bind(uuid::Uuid::parse_str(&verification_id)?)
+            .fetch_one(&setup.owner)
+            .await?;
+    assert_eq!(attempts, 5, "the attempts were not counted");
+
+    let right = code_of(&setup.sms.last_body().ok_or("no SMS was sent")?)?;
+    let answer = confirm_takeover(&setup.deps, &claimant_access, &verification_id, &right).await;
+    assert_eq!(
+        status(&answer),
+        400,
+        "the sixth attempt was accepted: {answer}"
+    );
+
+    Ok(())
+}
+
+/// A verification that expired is refused with its own code.
+#[tokio::test]
+async fn an_expired_verification_is_refused_with_its_own_code()
+-> Result<(), Box<dyn std::error::Error>> {
+    let clock = Arc::new(TestClock::new(NOW));
+    let setup = harness(clock, true).await?;
+    let (owner_access, _) = participant(&setup.deps).await?;
+    let _ = with_phone(&setup.deps, &owner_access).await?;
+    let (claimant_access, _) = participant(&setup.deps).await?;
+
+    let token = format!("device-{}", uuid::Uuid::new_v4());
+    let answer = register_device(&setup.deps, &owner_access, &token).await;
+    assert_eq!(status(&answer), 201);
+
+    let answer = register_device(&setup.deps, &claimant_access, &token).await;
+    assert_eq!(status(&answer), 202);
+    let verification_id = data(&answer)["verification_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let code = code_of(&setup.sms.last_body().ok_or("no SMS was sent")?)?;
+
+    // The verification ages: the clock of the test is not the clock of the
+    // database, so the row is the one that moves.
+    sqlx::query(
+        "UPDATE device_verifications SET expires_at = now() - interval '1 minute' WHERE id = $1",
+    )
+    .bind(uuid::Uuid::parse_str(&verification_id)?)
+    .execute(&setup.owner)
+    .await?;
+
+    let answer = confirm_takeover(&setup.deps, &claimant_access, &verification_id, &code).await;
+    assert_eq!(
+        status(&answer),
+        409,
+        "the expired code was accepted: {answer}"
+    );
+    assert_eq!(error_code(&answer), "DEVICE_VERIFICATION_EXPIRED");
+
+    Ok(())
+}
+
+/// A takeover whose owner has no phone cannot be verified.
+#[tokio::test]
+async fn a_device_without_a_phone_cannot_be_verified() -> Result<(), Box<dyn std::error::Error>> {
+    let clock = Arc::new(TestClock::new(NOW));
+    let setup = harness(clock, true).await?;
+    let (owner_access, owner_id) = participant(&setup.deps).await?;
+    // The owner has no phone on file.
+    let (claimant_access, _) = participant(&setup.deps).await?;
+
+    let token = format!("device-{}", uuid::Uuid::new_v4());
+    let answer = register_device(&setup.deps, &owner_access, &token).await;
+    assert_eq!(status(&answer), 201);
+
+    let answer = register_device(&setup.deps, &claimant_access, &token).await;
+    assert_eq!(
+        status(&answer),
+        409,
+        "the takeover was not refused: {answer}"
+    );
+    assert_eq!(error_code(&answer), "DEVICE_OWNER_UNVERIFIABLE");
+    assert!(
+        setup.sms.sent().is_empty(),
+        "the SMS went to a participant without a phone"
+    );
+
+    // And the token did not move.
+    let owner: uuid::Uuid = sqlx::query_scalar("SELECT user_id FROM push_devices WHERE token = $1")
+        .bind(&token)
+        .fetch_one(&setup.owner)
+        .await?;
+    assert_eq!(
+        owner.to_string(),
+        owner_id,
+        "the token moved without a verification"
+    );
+
+    Ok(())
+}
+
+/// The logout hands the devices back.
+#[tokio::test]
+async fn the_logout_releases_the_devices() -> Result<(), Box<dyn std::error::Error>> {
+    let clock = Arc::new(TestClock::new(NOW));
+    let setup = harness(clock, true).await?;
+
+    let token = magic_link(&setup.deps, &unique_email()).await?;
+    let session = session(&setup.deps, &token).await?;
+    let access = session["access_token"].as_str().unwrap().to_string();
+    let refresh = session["refresh_token"].as_str().unwrap().to_string();
+    let user_id = session["user"]["id"].as_str().unwrap().to_string();
+
+    let device_token = format!("device-{}", uuid::Uuid::new_v4());
+    let answer = register_device(&setup.deps, &access, &device_token).await;
+    assert_eq!(status(&answer), 201);
+
+    let devices: i64 = sqlx::query_scalar("SELECT count(*) FROM push_devices WHERE user_id = $1")
+        .bind(uuid::Uuid::parse_str(&user_id)?)
+        .fetch_one(&setup.owner)
+        .await?;
+    assert_eq!(devices, 1, "the device was not registered");
+
+    // The logout of the session that owns the device.
+    let answer = handlers::logout(&setup.deps, request(json!({ "refresh_token": refresh }))).await;
+    assert_eq!(status(&answer), 200);
+
+    // The device is gone: a device belongs to a session, not to a person.
+    let devices: i64 = sqlx::query_scalar("SELECT count(*) FROM push_devices WHERE user_id = $1")
+        .bind(uuid::Uuid::parse_str(&user_id)?)
+        .fetch_one(&setup.owner)
+        .await?;
+    assert_eq!(devices, 0, "the device survived the logout");
+
+    Ok(())
+}
+
 /// Revoking a token twice reports the second revoke as lost.
 ///
 /// This is the mechanism that closes the window between reading a token and

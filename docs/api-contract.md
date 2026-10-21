@@ -74,6 +74,9 @@ Todos los errores usan la misma forma:
 | `NUMBER_TAKEN` | 409 | Alguno de los números ya está reservado. `details.taken_numbers` los lista. |
 | `TICKET_LIMIT_REACHED` | 409 | El usuario alcanzó el máximo de tickets para ese sorteo. |
 | `PRIZE_ALREADY_CLAIMED` | 409 | El premio ya fue reclamado por su ganador. |
+| `DEVICE_CODE_INVALID` | 400 | El código de la verificación de un dispositivo es incorrecto. |
+| `DEVICE_VERIFICATION_EXPIRED` | 409 | La verificación de la toma de control de un dispositivo venció. |
+| `DEVICE_OWNER_UNVERIFIABLE` | 409 | El dueño actual del dispositivo no tiene teléfono en su ficha: la toma de control no se puede verificar. |
 | `TICKET_SIZE_OUT_OF_RANGE` | 422 | La cantidad de números está fuera de `[min, max]`. |
 | `INVALID_VALIDATION_CODE` | 422 | El código no existe o está revocado. |
 | `VALIDATION_CODE_USED` | 409 | El código ya se usó. |
@@ -366,7 +369,36 @@ Anonimiza PII, pone `tickets.user_id = NULL`, conserva los premios. Devuelve `20
 ```http
 POST   /v1/me/devices
 DELETE /v1/me/devices/{id}
+POST   /v1/me/devices/verifications/{id}/confirm
 ```
+
+**El token de un dispositivo identifica un teléfono, no a una persona.** Es único de forma global, así que la misma cuenta puede pedir un token que ya es de otra: eso no es un ataque, es la misma persona con una segunda cuenta.
+
+Cuando el token ya pertenece a otro participante, el registro **no falla**: abre una **verificación por SMS** y responde `202`.
+
+| Respuesta | Cuándo | Cuerpo |
+|---|---|---|
+| `201` | El token estaba libre, o ya era del participante | El dispositivo registrado |
+| `202` | El token es de otro participante | `{ "verification_id": "…", "status": "pending", "expires_at": "…" }` |
+| `409 DEVICE_OWNER_UNVERIFIABLE` | El dueño actual no tiene teléfono en ficha | No se puede verificar, el token no se mueve |
+
+**El SMS va al teléfono del dueño actual del token, no al del que lo reclama.** Si fuera al del reclamante, un atacante que copió el token recibiría su propio código y la transferencia funcionaría. Mandándolo al dueño, solo quien tiene el teléfono en la mano puede autorizar, y el dueño también puede negarse: no haciendo nada.
+
+El código son **seis dígitos**, vive **diez minutos** y admite **cinco intentos**. Solo se guarda su SHA-256.
+
+```http
+POST /v1/me/devices/verifications/{id}/confirm
+{ "code": "123456" }
+```
+
+| Respuesta | Cuándo |
+|---|---|
+| `200` | El código era correcto y el dispositivo cambió de dueño |
+| `400 DEVICE_CODE_INVALID` | El código no era |
+| `409 DEVICE_VERIFICATION_EXPIRED` | La verificación venció |
+| `403 RBAC_FORBIDDEN` | La verificación no es de quien la confirma |
+
+**El cierre de sesión libera los dispositivos.** Un dispositivo es de una sesión, no de una persona: si no se liberan, la misma persona con una segunda cuenta pierde el push en silencio.
 
 ```json
 { "platform": "android", "token": "fcm-token", "app_version": "1.2.0" }

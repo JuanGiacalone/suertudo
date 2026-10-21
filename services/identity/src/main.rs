@@ -16,8 +16,8 @@ use serde_json::{Value, json};
 use suertudo_db::pool;
 
 use suertudo_identity::adapters::{
-    Hs256TokenSigner, PostgresConsentRepository, PostgresDeviceRepository, PostgresTokenRepository,
-    PostgresUserRepository, RandomTokenSource, Sha256Digest, SystemClock,
+    Hs256TokenSigner, LoggingSmsSender, PostgresConsentRepository, PostgresDeviceRepository,
+    PostgresTokenRepository, PostgresUserRepository, RandomTokenSource, Sha256Digest, SystemClock,
 };
 use suertudo_identity::config::Config;
 use suertudo_identity::domain::service::IdentityService;
@@ -46,6 +46,13 @@ async fn main() -> Result<(), anyhow::Error> {
         clock.clone(),
     ));
 
+    // The provider of the SMS is not decided yet: the only implementation
+    // that exists writes the message to the log, and the configuration
+    // refuses to start the worker with it outside development.
+    let sms: Arc<dyn suertudo_identity::ports::SmsSender> = match config.sms_provider {
+        suertudo_identity::config::SmsProvider::Logging => Arc::new(LoggingSmsSender),
+    };
+
     let service = Arc::new(IdentityService {
         users: Arc::new(PostgresUserRepository::new(pool.clone())),
         tokens: Arc::new(PostgresTokenRepository::new(pool.clone())),
@@ -55,6 +62,7 @@ async fn main() -> Result<(), anyhow::Error> {
         token_source: Arc::new(RandomTokenSource),
         digest: Arc::new(Sha256Digest),
         signer: signer.clone(),
+        sms,
     });
 
     let deps = Arc::new(Deps {
