@@ -34,6 +34,22 @@ cd "$SPIKE_DIR"
 # cargo is not on PATH in a bare shell (rustup installs to ~/.cargo/bin).
 [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
 
+# The probe worker has to be compiled before it is started. The spike is NOT
+# a member of the workspace (it has its own lockfile and its own pin of the
+# SDK), so `cargo build --workspace` does not build it. The script compiles
+# it so that it is self-sufficient: the CI runs it in a checkout where the
+# binary does not exist yet, and a script that needs a binary built by hand
+# is a script that only works on the machine of whoever wrote it.
+echo "Compilando el worker de prueba..."
+if ! cargo build --quiet --bin iii-health-spike; then
+  echo "    FALLO: no se pudo compilar el worker de prueba"
+  exit 1
+fi
+[ -x "$SPIKE_DIR/target/debug/iii-health-spike" ] || {
+  echo "    FALLO: el worker de prueba no quedo en target/debug/iii-health-spike"
+  exit 1
+}
+
 ENGINE_URL="ws://127.0.0.1:49134"
 NAMESPACE="spike"
 HEALTH_URL="http://127.0.0.1:3111/v1/health"

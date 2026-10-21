@@ -1,0 +1,174 @@
+# The pipeline of the backend and of the two clients.
+#
+# The jobs and their order are not arbitrary: the cheapest and most
+# informative go first, so that a mistake is caught in seconds and not in
+# minutes.
+#
+#   rust      the workspace: format, lints, tests, audit. Needs a Postgres.
+#   flutter   the app of the participants: analyze, format, tests.
+#   nextjs    the panel of the businesses: lint, types, build.
+#
+# The smoke test of the whole iii stack is NOT here: it is in
+# `smoke.yml`, because it needs the engine, the network and minutes.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A push that lands while the pipeline of the previous one is running
+# makes that previous one obsolete.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# The pipeline only reads the repository. It writes nothing.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # The database of the tests. The harness applies the migrations itself and
+  # creates the role of the application.
+  DATABASE_URL_TEST: postgres://suertudo:suertudo@127.0.0.1:5432/suertudo_test
+
+jobs:
+  rust:
+    name: rust
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: suertudo
+          POSTGRES_PASSWORD: suertudo
+          POSTGRES_DB: suertudo_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U suertudo"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        # The version comes from rust-toolchain.toml, so the pipeline builds
+        # with the same compiler that a developer has locally. Installing
+        # rustup without a default toolchain lets the file decide.
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain none
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            spikes/iii-health -> target
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Lints
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test --workspace
+
+      - name: The offline cache of sqlx matches the schema
+        # The build with a live database and the cache directory of the
+        # repository expands the macros against the real schema and WRITES
+        # the cache. A query that changed without regenerating the cache
+        # leaves a new file behind, and this step sees it.
+        #
+        # It runs AFTER the tests, because the migrations are applied by the
+        # harness of the tests: the schema has to exist before the macros
+        # are expanded against it.
+        #
+        # SQLX_OFFLINE is deliberately NOT set here. With it, the macros
+        # would read the cache instead of the schema, and this check would
+        # pass without comparing anything.
+        env:
+          DATABASE_URL: ${{ env.DATABASE_URL_TEST }}
+          SQLX_OFFLINE_DIR: ${{ github.workspace }}/services/db/.sqlx
+        run: |
+          # `sqlx::migrate!` embeds the migrations at compile time: touching
+          # the crate forces the macros to be expanded again.
+          touch services/db/src/lib.rs
+          cargo build -p suertudo-db
+          if [ -n "$(git status --porcelain services/db/.sqlx)" ]; then
+            echo "::error::the offline cache of sqlx does not match the schema."
+            echo "Regenerate it: SQLX_OFFLINE_DIR=\$PWD/services/db/.sqlx DATABASE_URL=\$DATABASE_URL cargo build -p suertudo-db"
+            git status --porcelain services/db/.sqlx
+            exit 1
+          fi
+
+      - name: Vulnerabilities
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit
+          # The spike has its own lockfile and its own pin of the SDK: it is
+          # a separate dependency tree, and it has to be audited on its own.
+          cargo audit --file spikes/iii-health/Cargo.lock
+
+  flutter:
+    name: flutter
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/mobile
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          # The exact version that a developer has locally: the pipeline has
+          # to prove what runs on the machine, not what runs on the latest
+          # release of the day.
+          flutter-version: '3.47.7'
+          cache: true
+
+      - name: Dependencies
+        run: flutter pub get
+
+      - name: Analyze
+        run: flutter analyze
+
+      - name: Format
+        run: dart format --set-exit-if-changed .
+
+      - name: Tests
+        run: flutter test
+
+  nextjs:
+    name: nextjs
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/business-web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # The version comes from the file, so the pipeline builds with the
+          # Node that a developer has locally. One source of truth.
+          node-version-file: apps/business-web/.nvmrc
+          cache: npm
+          cache-dependency-path: apps/business-web/package-lock.json
+
+      - run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Types
+        run: npx tsc --noEmit
+
+      - name: Build
+        run: npm run build

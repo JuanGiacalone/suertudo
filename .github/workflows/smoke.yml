@@ -1,0 +1,75 @@
+# The smoke test of the whole iii stack.
+#
+# This is the job that would have caught the two mistakes that cost the
+# most: a trigger type that does not get registered, and a version of the
+# SDK that silently breaks the routes. Both are silent: the worker looks
+# healthy in `engine::workers::list` and the feature simply never runs.
+#
+# It is separate from `ci.yml` because it is different in kind: it needs
+# the engine, the network and minutes, and it is worth running on a
+# schedule, to find out that an upstream release broke the stack before a
+# developer finds out.
+#
+# See `docs/spike-iii-health.md` for what every assertion proves.
+
+name: smoke
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Once a week, against the version the project pins. A broken upstream
+  # release has to be found here, not by the next person who touches the
+  # backend.
+  schedule:
+    - cron: '23 6 * * 1'
+  # To run it by hand, without waiting for a push.
+  workflow_dispatch:
+
+concurrency:
+  group: smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  smoke:
+    name: the stack comes up, without KVM
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        # The version comes from rust-toolchain.toml, so the pipeline builds
+        # with the same compiler that a developer has locally.
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain none
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            spikes/iii-health -> target
+
+      - name: Install the iii engine
+        # The version comes from infra/iii/VERSION, so the pipeline runs the
+        # engine that the project declares and not the latest one. The
+        # version of the engine and the version of the SDK move together, in
+        # the same pull request.
+        run: |
+          version="$(grep '^iii=' infra/iii/VERSION | cut -d= -f2)"
+          curl -fsSL https://install.iii.dev/iii/main/install.sh \
+            | sh -s -- --non-interactive "$version"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          iii --version
+
+      - name: The stack comes up, and the routes answer
+        # The engine, the registry workers, the queue, the cron and the
+        # routes. Without KVM: the workers are processes of the host.
+        run: unshare -rm ./scripts/smoke.sh

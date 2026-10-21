@@ -66,9 +66,9 @@ Los PRs encadenados se apilan así: `PR-1` (base) → `PR-2` (apila sobre `PR-1`
 
 **Criterio de salida:** `GET /v1/health` responde 200, un usuario puede registrarse por magic link y obtener un token, y el CI está verde en los tres stacks.
 
-> **Estado:** completadas `TSK-F0-01` a `TSK-F0-04` y `TSK-F0-06`. El spike `spikes/iii-health` validó el engine, los workers del registro (`http`, `queue`, `cron`), un worker Rust propio, la ruta HTTP completa, **la ruta de colas y cron completa** y **los dos transportes de cola**, **sin KVM**. También fijó las versiones de iii (engine 0.24.6 + SDK 0.24.6), decidió el transporte de producción (`builtin`, `ADR-013`) y entregó el golden test de la derivación commit–reveal. Ver [`spike-iii-health.md`](./spike-iii-health.md) para el porqué, la mecánica y los hallazgos.
+> **Estado:** completadas `TSK-F0-01` a `TSK-F0-06`. El spike `spikes/iii-health` validó el engine, los workers del registro (`http`, `queue`, `cron`), un worker Rust propio, la ruta HTTP completa, **la ruta de colas y cron completa** y **los dos transportes de cola**, **sin KVM**. También fijó las versiones de iii (engine 0.24.6 + SDK 0.24.6), decidió el transporte de producción (`builtin`, `ADR-013`) y entregó el golden test de la derivación commit–reveal. Ver [`spike-iii-health.md`](./spike-iii-health.md) para el porqué, la mecánica y los hallazgos.
 >
-> **Abiertas:** `TSK-F0-05` (CI), `TSK-F0-07` (rate limits), `TSK-F0-08` (envío real del magic link), `TSK-F0-09` (rol de aplicación y smoke test del backend), `TSK-F0-11` (proveedor de SMS, que bloquea el despliegue fuera de development).
+> **Abiertas:** `TSK-F0-07` (rate limits), `TSK-F0-08` (envío real del magic link), `TSK-F0-09` (rol de aplicación y smoke test del backend), `TSK-F0-11` (proveedor de SMS, que bloquea el despliegue de producción).
 >
 > **Una función de la base falta todavía:** `claim_prize(p_prize_id, p_user_id, p_claim_code)`, sin la cual `FR-DR-08` y `POST /v1/me/prizes/{prize_id}/claim` no tienen camino. La especificación está en `docs/data-model.md` §3.27.
 
@@ -241,19 +241,33 @@ README.md
 
 ### `TSK-F0-05` — Pipeline de CI
 
-**Épica:** E0.5 · **Depende de:** `TSK-F0-01` · **Esfuerzo:** 1 d
+**Épica:** E0.5 · **Depende de:** `TSK-F0-01` · **Esfuerzo:** 1 d · **Estado: COMPLETADA**
 
 **Contexto:** el pipeline tiene que ser la red de seguridad de todo lo que viene. Un PR que rompe el build no llega a main.
 
-**Archivos:** `.github/workflows/ci.yml`, `.github/workflows/smoke.yml`
+**Archivos:** `.github/workflows/ci.yml`, `.github/workflows/smoke.yml`, `scripts/smoke.sh`, `apps/mobile/test/app_smoke_test.dart`, `apps/business-web/.nvmrc`
 
 **Criterios de aceptación:**
-- [ ] Job de Rust: `fmt --check`, `clippy -D warnings`, `test --workspace`, `sqlx prepare --check`, `cargo audit`.
-- [ ] Job de Flutter: `analyze`, `test`, `format --set-exit-if-changed`.
-- [ ] Job de Next.js: `lint`, `typecheck`, `test`, `build`.
-- [ ] Job de contrato: compara el OpenAPI generado contra el commiteado y falla si hay cambios no intencionales.
-- [ ] Smoke test: levanta el motor iii, registra un worker, invoca una función por HTTP y verifica la respuesta.
-- [ ] El job de evals de IA corre solo si el PR toca `services/ai-branding/`.
+- [x] Job de Rust: `fmt --all -- --check`, `clippy -D warnings`, `test --workspace`, `cargo audit`, y el cache offline de sqlx contra el esquema.
+- [x] Job de Flutter: `analyze`, `test`, `format --set-exit-if-changed`.
+- [x] Job de Next.js: `lint`, `typecheck`, `build`.
+- [x] Smoke test: levanta el motor iii, registra un worker, invoca una función por HTTP y verifica la respuesta.
+
+**Criterios que no se pueden cumplir todavía, y por qué:**
+- [ ] Job de Next.js: `test`. El panel no tiene runner de tests, ni tests. Instalar una cadena de dependencias nueva para testear un scaffolding que la Fase 1 va a reemplazar no compra nada. El criterio se cierra con la primera pantalla del panel.
+- [ ] Job de contrato: compara el OpenAPI generado contra el commiteado. **No hay OpenAPI**: el contrato vive escrito a mano en [`api-contract.md`](./api-contract.md) y la API sólo expone `/v1/health`. Diferenciar un archivo contra sí mismo no es un check. Llega con los primeros endpoints de la Fase 1.
+- [ ] Job de evals de IA: corre sólo si el PR toca `services/ai-branding/`. Ese crate es de la Fase 2.
+
+**El check del cache de sqlx, sin `sqlx prepare --check`.** El cache de `services/db/.sqlx` está commiteado a propósito: sin él, `cargo build` en un checkout limpio falla. El CI lo comprueba con otro mecanismo, que no necesita instalar `sqlx-cli`: compila el crate con la base de datos viva y con `SQLX_OFFLINE_DIR` apuntando al cache commiteado. Los macros se expanden contra el esquema real y **escriben** el cache; si una query cambió sin regenerarlo, aparece un archivo nuevo y `git status` lo ve. `SQLX_OFFLINE` no se pone en ese paso a propósito: con él los macros leerían el cache en vez del esquema, y el check pasaría sin comparar nada.
+
+**Una sola fuente de verdad para cada versión.** Un CI que compila con otro compilador que el del desarrollador es un CI que prueba otra cosa: la versión de Rust vive en `rust-toolchain.toml`, la de Node en `apps/business-web/.nvmrc`, la de Flutter y la de iii en el pipeline y en `infra/iii/VERSION`.
+
+**Verificado en local, no sólo escrito:**
+- `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings` y `cargo test --workspace`: limpios.
+- El check del cache de sqlx: limpio con el esquema actual, y **con dientes** — al cambiar una query a mano, el check lo detectó.
+- Flutter: `analyze` sin hallazgos, `format` sin cambios, 1 test verde.
+- Next.js: `lint` limpio, `tsc --noEmit` sin errores, `build` OK.
+- `unshare -rm ./scripts/smoke.sh`: **PASS**, las trece secciones en verde.
 
 ---
 
@@ -274,7 +288,7 @@ README.md
 - [x] `iii::queue::redrive` reprocesa el mensaje; `iii::queue::discard_message` lo descarta.
 - [x] Un trigger `cron` se dispara efectivamente (contador de ticks).
 - [x] Todo el stack sigue levantando **sin KVM**.
-- [x] `verify.sh` queda como el smoke test del CI, con teardown por nombre de proceso exacto.
+- [x] `scripts/smoke.sh` queda como el smoke test del CI, con teardown por nombre de proceso exacto.
 - [x] El adaptador `rabbitmq` se verificó contra un broker real y dio lugar a `ADR-013`.
 
 **Verificación:** `unshare -rm ./scripts/smoke.sh` → `RESULTADO: PASS` (13 secciones)

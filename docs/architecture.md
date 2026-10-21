@@ -732,63 +732,62 @@ iii-sdk=0.25.0-rc.4
 
 ### 9.1 Pipelines
 
-```yaml
-# .github/workflows/ci.yml (resumen)
-on: [push, pull_request]
+El pipeline está partido en dos archivos, y la partición es de naturaleza, no de tamaño:
 
-jobs:
-  rust:
-    strategy:
-      matrix: { crate: [api, identity, raffles, participation, draws, notifications, ai-branding, crm, audit] }
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - run: cargo fmt --check
-      - run: cargo clippy -- -D warnings
-      - run: cargo test --workspace --all-features
-      - run: cargo sqlx prepare --check      # el SQL compilado coincide con el esquema
-      - run: cargo audit                    # falla si hay vulnerabilidad alta
+| Archivo | Jobs | Qué corre |
+|---|---|---|
+| `.github/workflows/ci.yml` | `rust`, `flutter`, `nextjs` | El código, en minutos, en cada push |
+| `.github/workflows/smoke.yml` | `smoke` | El stack de iii entero, de punta a punta, sin KVM |
 
-  flutter:
-    steps:
-      - uses: subosito/flutter-action@v2
-      - run: flutter analyze
-      - run: flutter test
-      - run: dart format --set-exit-if-changed .
+**Por qué el smoke test está aparte.** Es el único job que necesita el motor, la red y minutos, y es el único que vale la pena correr **por calendario**: si una versión upstream del motor rompe el stack, tiene que aparecer en el pipeline del lunes y no en el próximo PR que toca el backend. También se puede correr a mano, con `workflow_dispatch`.
 
-  nextjs:
-    steps:
-      - run: npm ci
-      - run: npm run lint
-      - run: npm run typecheck
-      - run: npm run test
-      - run: npm run build
+**El orden dentro de `ci.yml` no es arbitrario.** Lo más barato y lo más informativo va primero, para que un error se encuentre en segundos y no en minutos:
 
-  contract:
-    steps:
-      - run: cargo test -p suertudo-contract-tests   # OpenAPI vs implementación
-      - run: openapi-diff --fail-on-breaking previous.json openapi.json
+| Job | Comprueba | Con qué |
+|---|---|---|
+| `rust` | `fmt --check`, `clippy -D warnings`, `test --workspace`, `cargo audit` | Un Postgres 16 de servicio |
+| `flutter` | `analyze`, `format --set-exit-if-changed`, `test` | Flutter 3.47.7 |
+| `nextjs` | `lint`, `tsc --noEmit`, `build` | Node 26.12.0 |
 
-  evals:
-    if: contains(github.event.pull_request.files.*, 'services/ai-branding/')
-    steps:
-      - run: cargo test -p ai-branding --test evals -- --ignored
-```
+**Una sola fuente de verdad para cada versión.** Un CI que compila con otro compilador que el del desarrollador es un CI que prueba otra cosa:
+
+| Qué | Dónde vive la versión | Quién la lee |
+|---|---|---|
+| Rust | `rust-toolchain.toml` | `rustup`, en local y en el CI |
+| Node | `apps/business-web/.nvmrc` | `setup-node` con `node-version-file` |
+| Flutter | el número exacto, en `ci.yml` | `flutter-action` |
+| iii | `infra/iii/VERSION` | el paso que instala el motor |
+
+El motor y el SDK se fijan juntos en `infra/iii/VERSION` y se mueven en el mismo pull request (`§8.6`). El CI instala **la versión declarada**, no la última: una versión nueva del motor puede romper el stack en silencio, y eso tiene que ser un cambio explícito y revisado.
+
+**El check del cache offline de sqlx.** El cache de `services/db/.sqlx` está commiteado a propósito: sin él, `cargo build` en un checkout limpio falla con errores de compilación de los macros `query!`. El CI comprueba que ese cache siga coincidiendo con el esquema, y lo hace **sin** `cargo sqlx prepare --check`, que obligaría a instalar `sqlx-cli`:
+
+1. Los tests corren primero: el harness aplica las migraciones, así que el esquema existe.
+2. El build se hace con la base de datos viva y con `SQLX_OFFLINE_DIR` apuntando al cache commiteado. Los macros se expanden contra el esquema real y **escriben** el cache.
+3. Si una query cambió sin regenerar el cache, aparece un archivo nuevo en `services/db/.sqlx`, y `git status --porcelain` lo ve.
+
+`SQLX_OFFLINE` **no** se pone en ese paso, a propósito: con él, los macros leerían el cache en vez del esquema, y el check pasaría sin comparar nada.
+
+**Lo que todavía no está, y por qué:**
+
+- **El job de contrato** compararía el OpenAPI generado contra el commiteado. Hoy no hay OpenAPI: el contrato vive escrito a mano en [`api-contract.md`](./api-contract.md) y la API sólo expone `/v1/health`. No hay nada que diferenciar todavía, y un job que compara un archivo contra sí mismo no es un check.
+- **El job de evals de IA** correría sólo si el PR toca `services/ai-branding/`. Ese crate no existe: la IA de tema es parte de la Fase 2.
 
 ### 9.2 El problema de KVM en CI
 
-Los workers de iii **no** requieren microVM si corren como procesos (`ADR-011`). El pipeline de Rust corre:
+Los workers de iii **no** requieren microVM si corren como procesos (`ADR-011`). El motor levanta sin KVM porque no provisions workers: los tests levantan sus workers como procesos normales.
+
+El smoke test fuerza ese camino a propósito, con `unshare -rm`:
 
 ```bash
-# Terminal 1 (background)
-iii --config infra/iii/config.yaml &
-# Terminal 2
-cargo test -p suertudo-contract-tests
+unshare -rm ./scripts/smoke.sh
 ```
 
-El motor levanta sin KVM porque no provisions workers: los tests levantan sus workers como procesos normales.
+El script es autocontenido: **compila el worker de prueba antes de arrancarlo**. El spike está excluido del workspace de Rust (tiene su propio lockfile y su propio pin del SDK), así que `cargo build --workspace` no lo construye, y un script que necesita un binario compilado a mano es un script que sólo funciona en la máquina de quien lo escribió.
 
-**Verificación en CI:** el pipeline incluye un smoke test que levanta el motor, registra un worker de prueba, invoca una función por HTTP y verifica la respuesta. Si el motor cambió de comportamiento entre versiones, este test falla **antes** de que rompa en producción.
+El script verifica las trece cosas que importan del stack: el motor escucha, el worker `http` del registro levanta, el worker propio registra su función y su trigger `http`, la ruta responde, la función se invoca por el engine, la cola entrega, el consumidor que falla reintenta y después va a la DLQ, la DLQ se puede listar y reprocesar, el trigger `cron` se dispara, y el valor dorado de la derivación se sostiene.
+
+**Verificación en CI:** este job es el que habría atrapado los dos errores que más costaron: un tipo de trigger que no queda registrado, y una versión del SDK que rompe las rutas en silencio. Los dos son silenciosos — el worker parece sano en `engine::workers::list` y la función simplemente nunca corre.
 
 ### 9.3 Despliegue
 

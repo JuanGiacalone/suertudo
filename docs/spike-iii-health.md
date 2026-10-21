@@ -45,7 +45,7 @@ Tres razones, en orden de peso:
 
 ### 2.3 Lo que el spike NO es
 
-- **No es un prototipo que se tire.** El worker y el script de verificación se mantienen: `verify.sh` es el smoke test del CI.
+- **No es un prototipo que se tire.** El worker y el script de verificación se mantienen: `scripts/smoke.sh` es el smoke test del CI (`.github/workflows/smoke.yml`).
 - **No es una prueba unitaria.** Verifica un stack entero, en un entorno real.
 - **No es un documento de arquitectura.** La arquitectura vive en [`architecture.md`](./architecture.md). Este documento explica por qué se midió lo que se midió.
 
@@ -55,14 +55,19 @@ Tres razones, en orden de peso:
 
 ```
 spikes/iii-health/
-├── verify.sh            # El check end-to-end. Idempotente, se autolimpia.
+├── Cargo.toml           # Crate aparte: su propio lockfile y su propio pin del SDK.
 ├── src/main.rs          # Worker Rust mínimo: una función, un trigger http.
-├── src/derivation.rs    # La fórmula commit-reveal y sus golden tests.
 ├── src/lib.rs           # Raíz de librería, para que los tests corran sueltos.
+├── src/queue_probe.rs   # Las pruebas de cola y cron.
 ├── config.yaml          # Config del engine. `workers: []` apaga el HTTP legacy.
-├── worker-compose.yaml  # Declara el worker `http` del registro.
+├── worker-compose.yaml  # Declara los workers `http`, `queue` y `cron` del registro.
 └── README.md            # Manual operativo.
+
+scripts/smoke.sh        # El check end-to-end. Idempotente, se autolimpia.
+services/draws/          # La fórmula commit-reveal y sus golden tests.
 ```
+
+Dos piezas del spike PROMUEBAN al producto y por eso se promovieron: el script de verificación pasó a ser `scripts/smoke.sh` —el smoke test del CI— y la derivación pasó a `services/draws/`, que es donde vive la fórmula que el producto promete.
 
 La mínima cantidad de piezas que prueban las dos cosas que importan: **que el stack levanta** y **que la fórmula es auditable**.
 
@@ -110,7 +115,7 @@ unshare -rm bash -c '
 '
 ```
 
-`stat` imprime en **hexadecimal**: `a,e8` es el KVM real (10, 232) y `1,3` es `/dev/null`. Ese es el assert que usa `verify.sh`.
+`stat` imprime en **hexadecimal**: `a,e8` es el KVM real (10, 232) y `1,3` es `/dev/null`. Ese es el assert que usa `scripts/smoke.sh`.
 
 Dentro de ese namespace, `iii`, `iii compose` y el worker Rust levantan igual y el health responde `200`. Ningún proceso `iii-worker` (el lanzador de microVM) llega a existir.
 
@@ -154,7 +159,7 @@ El golden test la implementa tal cual y la congela. El valor de ejemplo, con `se
 
 ### 5.1 El stack no necesita KVM — `R2` cerrado
 
-Todos los workers usados son procesos del host. El worker `http` del registro es `Type: binary`; el nuestro es un `path`. `verify.sh` asserta que **no** exista ningún proceso `iii-worker` en ningún momento de la corrida.
+Todos los workers usados son procesos del host. El worker `http` del registro es `Type: binary`; el nuestro es un `path`. `scripts/smoke.sh` asserta que **no** exista ningún proceso `iii-worker` en ningún momento de la corrida.
 
 **Consecuencia:** el pipeline de CI no necesita `/dev/kvm`, ni acceso privilegiado, ni una máquina specially equipped. Eso elimina una restricción de infraestructura que era la vía más rápida a un despliegue de backend.
 
@@ -372,7 +377,7 @@ Reglas operativas, derivadas de los hallazgos. Todas son verificables.
 | **Recordá que Linux trunca los nombres a 15 caracteres.** | `iii-health-spike` es `iii-health-spik`. Un `pkill -x` con el nombre largo no matchea nada y deja el worker viejo sirviendo. |
 | **Usá `pgrep -x` y `pkill -x`, nunca `-f`, para nombres de proceso.** | `-f` matchea la propia línea de comandos del script: el chequeo miente y el teardown se suicida. |
 | **El teardown tiene que matar a los workers del registro.** | Se reconectan solos al engine. Si sobreviven, la corrida siguiente falla con `CONTAINER_NAME_TAKEN`. |
-| **Cada corrida del smoke test tiene que terminar con cero procesos iii vivos.** | Es la precondición de la corrida siguiente. `verify.sh` lo asserta al principio y lo limpia al salir. |
+| **Cada corrida del smoke test tiene que terminar con cero procesos iii vivos.** | Es la precondición de la corrida siguiente. `scripts/smoke.sh` lo asserta al principio y lo limpia al salir. |
 | **Para probar la ausencia de KVM: `unshare -rm` + `mount --bind /dev/null /dev/kvm`.** | `stat -c '%t,%T'` da `1,3` en hex cuando el KVM está enmascarado, `a,e8` cuando es real. |
 
 ### 7.3 Sobre el producto
@@ -420,6 +425,10 @@ Honestidad sobre los límites. La lista es corta a propósito.
 # Forzar la ruta sin KVM (lo que hace el CI)
 unshare -rm ./scripts/smoke.sh
 ```
+
+En el CI el mismo script corre en `.github/workflows/smoke.yml`, que además lo dispara **por calendario**: si una versión upstream del motor rompe el stack, tiene que aparecer en el pipeline del lunes y no en el próximo PR que toque el backend.
+
+El script es autocontenido: compila el worker de prueba antes de arrancarlo. El spike está excluido del workspace de Rust — tiene su propio lockfile y su propio pin del SDK — así que `cargo build --workspace` no lo construye, y un script que necesita un binario compilado a mano es un script que sólo funciona en la máquina de quien lo escribió.
 
 Salida esperada:
 
