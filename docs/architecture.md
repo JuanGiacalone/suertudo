@@ -221,6 +221,10 @@ Cliente → HTTPS → API HTTP (contrato estable) → [worker iii] → Dominio �
 
 **Alternativas descartadas:** usar iii como contrato público (expone el motor a internet y ata el producto a un RC); Axum puro sin iii (descarta la orquestación y las colas que el usuario pidió explícitamente).
 
+**Consecuencia para el middleware.** El middleware de autorización de iii corre en el puerto RBAC del engine, y ahí sí puede mutar el contexto. Pero el worker `http` v0.22.7, que es el que expone las rutas, **no puede transportar un payload mutado al handler**: su middleware solo puede responder o continuar. Por eso los handlers de identidad **resuelven la misma sesión con el mismo código** y encuentran el mismo contexto que el middleware habría inyectado.
+
+El invariante se mantiene igual: **la identidad sale de la sesión, nunca del cuerpo ni del path**. Que el middleware y el handler resuelvan la sesión por separado es una duplicación, no una vía alternativa para leer el tenant del request.
+
 ---
 
 ### ADR-003 — Rust para todo el backend
@@ -347,6 +351,12 @@ La API setea `SET LOCAL app.business_id` y `SET LOCAL app.user_id` en **toda** t
 **Consecuencia:** un `WHERE` olvidado en el código no expone datos entre negocios. El error se manifiesta como "no trae nada", no como "trae datos de otro tenant". Eso es exactamente lo que se quiere.
 
 **Cost:** un `SET LOCAL` por transacción y un plan de queries ligeramente más complejo. Se acepta: el costo de una fuga de datos entre negocios es el costo del producto.
+
+**El rol de la aplicación no puede ser el propietario del esquema.** Postgres no le aplica las políticas de RLS a quien posee la tabla. Si la API conecta con el rol que creó el esquema, **la segunda barrera no existe**. El rol de aplicación se crea en el despliegue, nunca en una migración: una contraseña no pertenece a un archivo de esquema. Los tests de RLS conectan con un rol aparte, por el mismo motivo.
+
+**Dos excepciones públicas, y son deliberadas.** `raffles` se puede leer cuando `status = 'published'` y `draws` cuando `seed_revealed = true`. Sin ellas, el feed público y la **verificación pública del sorteo** —la promesa de confianza del producto— devolverían cero filas. Todo lo demás falla cerrado.
+
+**El RLS real cubre 13 tablas de tenant**, más `audit_log` y `outbox`. `users`, `auth_tokens` y `token_families` también están cubiertas, pero su aislamiento no se expresa con políticas: el login no tiene contexto de tenant, así que usa funciones `SECURITY DEFINER` de cuerpo fijo. El detalle está en [`data-model.md`](./data-model.md) §3.20 y §3.24.
 
 ---
 

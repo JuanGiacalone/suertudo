@@ -66,7 +66,9 @@ Los PRs encadenados se apilan así: `PR-1` (base) → `PR-2` (apila sobre `PR-1`
 
 **Criterio de salida:** `GET /v1/health` responde 200, un usuario puede registrarse por magic link y obtener un token, y el CI está verde en los tres stacks.
 
-> **Estado:** el spike `spikes/iii-health` ya validó el engine, los workers del registro (`http`, `queue`, `cron`), un worker Rust propio, la ruta HTTP completa, **la ruta de colas y cron completa** y **los dos transportes de cola**, **sin KVM**. También fijó las versiones de iii (engine 0.24.6 + SDK 0.24.6), decidió el transporte de producción (`builtin`, `ADR-013`) y entregó el golden test de la derivación commit–reveal. Ver [`spike-iii-health.md`](./spike-iii-health.md) para el porqué, la mecánica y los hallazgos.
+> **Estado:** completadas `TSK-F0-01` a `TSK-F0-04` y `TSK-F0-06`. El spike `spikes/iii-health` validó el engine, los workers del registro (`http`, `queue`, `cron`), un worker Rust propio, la ruta HTTP completa, **la ruta de colas y cron completa** y **los dos transportes de cola**, **sin KVM**. También fijó las versiones de iii (engine 0.24.6 + SDK 0.24.6), decidió el transporte de producción (`builtin`, `ADR-013`) y entregó el golden test de la derivación commit–reveal. Ver [`spike-iii-health.md`](./spike-iii-health.md) para el porqué, la mecánica y los hallazgos.
+>
+> **Abiertas:** `TSK-F0-05` (CI), `TSK-F0-07` (rate limits), `TSK-F0-08` (envío real del magic link), `TSK-F0-09` (rol de aplicación y smoke test del backend).
 
 ---
 
@@ -124,44 +126,56 @@ README.md
 
 ### `TSK-F0-03` — Esquema base y migraciones
 
-**Épica:** E0.3 · **Depende de:** `TSK-F0-01` · **Esfuerzo:** 1,5 d
+**Épica:** E0.3 · **Depende de:** `TSK-F0-01` · **Esfuerzo:** 1,5 d · **Estado: COMPLETADA**
 
-**Contexto:** crear el esquema completo de [`data-model.md`](./data-model.md) en migraciones. **Es la base de todo lo demás**; conviene hacerlo entero ahora y no incrementalmente, porque cambiar el esquema después es más caro.
-
-**Archivos:** `services/db/migrations/0001..0012_*.sql`, `services/db/`
+**Contexto:** el esquema es el contrato de [`data-model.md`](./data-model.md) §3. La Fase 1 empieza por acá, así que el esquema tiene que existir entero y con sus invariantes **en la base**, no en checks de aplicación.
 
 **Criterios de aceptación:**
-- [ ] Las 16 tablas de §3 de `data-model.md` existen con sus constraints e índices.
-- [ ] El trigger `tickets_business_match_trg` está activo.
-- [ ] Las reglas append-only de `audit_log` están activas.
-- [ ] `UNIQUE (raffle_id, number)` en `ticket_numbers` está activa.
-- [ ] El índice parcial `tickets_user_raffle_limit_idx` está activo.
-- [ ] `cargo sqlx prepare` funciona y el cache se regenera.
-- [ ] Hay un test que verifica que un ticket con `business_id` distinto al del sorteo falla.
+- [x] Las 16 tablas de §3 existen con columnas, tipos, defaults y `CHECK`.
+- [x] `UNIQUE (raffle_id, number)` en `ticket_numbers` rechaza una segunda reserva del mismo número.
+- [x] `UNIQUE (raffle_id)` en `draws` rechaza un segundo sorteo del mismo sorteo.
+- [x] El índice parcial único de `tickets (raffle_id, user_id)` rechaza un ticket de más.
+- [x] El trigger `tickets_business_match_trg` rechaza un ticket de otro negocio.
+- [x] `audit_log` rechaza `UPDATE` y `DELETE`.
+- [x] Las políticas de RLS **fallan cerradas**: sin contexto de tenant no se lee nada.
+- [x] Las 12 migraciones de §7.2, en orden, aplicadas desde cero.
+- [x] `suertudo-db migrate` aplica las migraciones.
+- [x] Tests de integración contra un Postgres real: 22 tests.
 
-**Verificación:** `sqlx migrate run && cargo test -p suertudo-db`
+**Verificación:** `DATABASE_URL_TEST=… cargo test -p suertudo-db` → 22 tests en verde.
+
+**Desviaciones que el trabajo le impuso al documento** (corregidas en `data-model.md` §3.19): dos foreign keys circulares partidas entre archivos, el índice de email único, el RLS sobre 13 tablas con dos excepciones públicas, y la condición de consentimiento de §6.4 corregida para que un consentimiento revocado no se exporte.
+
+**Hallazgo que cambió la arquitectura:** el propietario de una tabla en Postgres **no le aplican** sus políticas de RLS. El rol de la API tiene que ser un rol sin propiedad sobre el esquema, en producción y en los tests. `data-model.md` §3.20.
 
 ---
 
 ### `TSK-F0-04` — Identidad: registro, magic link, sesión
 
-**Épica:** E0.4 · **Depende de:** `TSK-F0-02`, `TSK-F0-03` · **Esfuerzo:** 2 d
+**Épica:** E0.4 · **Depende de:** `TSK-F0-02`, `TSK-F0-03` · **Esfuerzo:** 2 d · **Estado: COMPLETADA**
 
 **Contexto:** el primer vertical de la API. Es también el que define el patrón de todos los handlers.
 
-**Archivos:** `services/identity/`, `services/api/src/handlers/auth.rs`
-
 **Criterios de aceptación:**
-- [ ] `POST /v1/auth/magic-link` responde `202` siempre, exista o no el email.
-- [ ] El enlace expira en 15 minutos y es de un solo uso (`400 AUTH_LINK_CONSUMED` al segundo uso).
-- [ ] `POST /v1/auth/magic-link/verify` devuelve access token (15 min) y refresh token (30 días).
-- [ ] `POST /v1/auth/refresh` rota el refresh token; usar uno ya rotado invalida la familia completa.
-- [ ] El access token es un JWT firmado HS256 con `sub`, `role`, `exp`, `iat`, `jti`.
-- [ ] El middleware `identity::authorize` está registrado en el puerto RBAC de iii e inyecta el contexto de sesión.
-- [ ] En `ENV=development`, la respuesta de magic link incluye `dev_magic_link`. En staging y producción, **el arranque falla** si esa opción está activa.
-- [ ] Test: un token expirado da `401 AUTH_EXPIRED`.
+- [x] `POST /v1/auth/magic-link` responde `202` siempre, exista o no el email.
+- [x] El enlace expira en 15 minutos y es de un solo uso (`400 AUTH_LINK_CONSUMED` al segundo uso).
+- [x] `POST /v1/auth/magic-link/verify` devuelve access token (15 min) y refresh token (30 días).
+- [x] `POST /v1/auth/refresh` rota el refresh token; usar uno ya rotado invalida la familia completa.
+- [x] El access token es un JWT firmado HS256 con `sub`, `role`, `exp`, `iat` y `jti`.
+- [x] El middleware `identity::authorize` resuelve la sesión e inyecta el contexto.
+- [x] En `ENV=development` la respuesta incluye `dev_magic_link`; en otro entorno el **arranque falla**.
+- [x] Test: un token expirado da `401 AUTH_EXPIRED`.
 
-**Verificación:** `cargo test -p suertudo-identity` + test de contrato HTTP.
+**Verificación:** `DATABASE_URL_TEST=… cargo test -p suertudo-identity` → 31 tests en verde (14 de dominio sin base, 17 de integración).
+
+**Lo que el trabajo le agregó al contrato:**
+- `auth_tokens` — la tabla que el modelo de datos **no tenía** y que la identidad necesita: un magic link es de un solo uso y un refresh token rota con su familia. `data-model.md` §3.17.
+- `users.notification_preferences` — `marketing_opt_in` no alcanzaba para los canales operativos. Migración `0014`.
+- El índice `auth_tokens_one_live_per_family_idx` — el original era **muerto**: filtraba por una columna que la rotación nunca escribe. El correcto impide que dos refresh concurrentes produzcan dos sucesores vivos.
+- `revoke_token` ahora **informa** si revocó. Sin eso, la ventana entre leer un token y revocarlo dejaba pasar un segundo refresh concurrente que emitía un sucesor válido sin matar la familia (`FR-ID-04`).
+- `sqlx::migrate!` **embebe los archivos al compilar**: agregar una migración no invalida el build y el binario aplica el conjunto viejo en silencio. `data-model.md` §3.21.
+
+**Fuera de su alcance, con dueño asignado:** el login del comercio con contraseña (`FR-ID-02`) es `TSK-F1-01`.
 
 ---
 
@@ -214,6 +228,59 @@ README.md
 **Pendiente:** cerrado. La decisión de transporte quedó tomada en [`ADR-013`](./architecture.md): **`builtin`**, sin broker externo, porque en RabbitMQ la API de DLQ de iii no puede direccionar la DLQ por función y los mensajes muertos quedan inaccesibles. Los dos transportes están verificados y el script acepta `QUEUE_ADAPTER=builtin|rabbitmq`.
 
 ---
+
+**Objetivo:** el bucle completo funcionando. Un negocio crea un sorteo con IA, un participante reserva números, el sistema sortea de forma verificable, el ganador se entera y el negocio ve su lista.
+
+**Duración estimada:** 3–4 sprints.
+
+**Criterio de salida:** los 7 ítems de §4.3 del PRD.
+
+---
+
+### `TSK-F0-07` — Rate limits de la API
+
+**Épica:** E0.7 · **Depende de:** `TSK-F0-04` · **Esfuerzo:** 0,5 d
+
+**Contexto:** `api-contract.md` §1.6 define seis grupos de rate limit. No hay ninguno implementado: sin ellos, el registro por magic link es un vector de spam de correo y de enumeración de emails.
+
+**Criterios de aceptación:**
+- [ ] Los seis grupos de §1.6 funcionan, con el límite por IP y por email donde corresponde.
+- [ ] La respuesta `429` incluye `Retry-After` y `X-RateLimit-Remaining`.
+- [ ] `users.last_magic_link_at` se usa para el grupo `auth:link`.
+- [ ] El rate limit vive en Redis, no en la memoria del proceso.
+
+---
+
+### `TSK-F0-08` — Envío real del magic link
+
+**Épica:** E0.8 · **Depende de:** `TSK-F0-04` · **Esfuerzo:** 0,5 d
+
+**Contexto:** el magic link se genera y se guarda, pero **nadie lo envía**: en development viaja en la respuesta y en staging no hay proveedor de correo. Sin esto, el flujo de registro no se puede probar fuera de la máquina.
+
+**Criterios de aceptación:**
+- [ ] Un worker de correo envía el magic link con una plantilla versionada.
+- [ ] En `staging` el correo llega a la allow-list y a nadie más.
+- [ ] El token en claro existe una sola vez: en el correo, nunca en la base.
+- [ ] `consent_records.ip_hash` se completa con un salt definido y rotable (hoy queda `NULL`).
+
+---
+
+### `TSK-F0-09` — Rol de aplicación y smoke test del backend
+
+**Épica:** E0.9 · **Depende de:** `TSK-F0-03` · **Esfuerzo:** 0,5 d
+
+**Contexto:** el aislamiento por RLS depende de que la aplicación **no** sea la propietaria del esquema, y el smoke test del spike todavía no levanta los workers del proyecto.
+
+**Criterios de aceptación:**
+- [ ] Existe un rol de aplicación con permisos sobre las tablas de tenant y **sin** propiedad del esquema.
+- [ ] El despliegue crea ese rol; ninguna migración lo hace.
+- [ ] `scripts/dev.sh up` levanta el engine, los workers del registro y los workers del proyecto, y `GET /v1/health` responde `200`.
+- [ ] El smoke test verifica que `SELECT max(version) FROM _sqlx_migrations` coincide con la cantidad de archivos `.sql`.
+- [ ] El smoke test verifica que el log del engine no contiene `is not registered`.
+
+---
+
+## 3. Fase 1 — MVP vertical
 
 **Objetivo:** el bucle completo funcionando. Un negocio crea un sorteo con IA, un participante reserva números, el sistema sortea de forma verificable, el ganador se entera y el negocio ve su lista.
 
@@ -618,7 +685,7 @@ Backlog abierto, priorizado por evidencia del uso real.
 
 | Fase | Épicas | Tareas detalladas | Esfuerzo | Riesgo principal |
 |---|---|---|---|---|
-| 0 — Cimientos | 7 | 7 | ~8,5 d | La reserva transaccional (`TSK-F1-12`) |
+| 0 — Cimientos | 9 | 9 | ~10,5 d | El rol de aplicación sin propiedad del esquema (`TSK-F0-09`) |
 | 1 — MVP vertical | 10 | 25 | ~42 d | La reserva transaccional (`TSK-F1-12`) |
 | 2 — Crecimiento | 10 | por detallar | ~30 d | Cobro de la suscripción |
 | 3 — Expansión | 8 | por detallar | ~40 d+ | Dependencia de terceros (lotería, CRM) |

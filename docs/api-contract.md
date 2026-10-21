@@ -73,6 +73,7 @@ Todos los errores usan la misma forma:
 | `RAFFLE_NOT_OPEN` | 409 | El sorteo todavía no abrió. |
 | `NUMBER_TAKEN` | 409 | Alguno de los números ya está reservado. `details.taken_numbers` los lista. |
 | `TICKET_LIMIT_REACHED` | 409 | El usuario alcanzó el máximo de tickets para ese sorteo. |
+| `PRIZE_ALREADY_CLAIMED` | 409 | El premio ya fue reclamado por su ganador. |
 | `TICKET_SIZE_OUT_OF_RANGE` | 422 | La cantidad de números está fuera de `[min, max]`. |
 | `INVALID_VALIDATION_CODE` | 422 | El código no existe o está revocado. |
 | `VALIDATION_CODE_USED` | 409 | El código ya se usó. |
@@ -346,7 +347,7 @@ PATCH  /v1/me
 }
 ```
 
-`PATCH /v1/me` con `{ "phone_e164": null }` **no** borra el teléfono: lo deja en `null` pero se conserva en la auditoría. Para borrado real, `DELETE /v1/me/contact`.
+`PATCH /v1/me` con `{ "phone_e164": null }` **no** borra el teléfono: lo deja en `null`. La auditoría registra **el hecho** del cambio, no el valor: guarda qué campos cambiaron, nunca sus valores. Para borrado real, `DELETE /v1/me/contact`.
 
 ### 3.7 Baja de cuenta
 

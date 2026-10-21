@@ -299,7 +299,9 @@ CREATE TRIGGER tickets_business_match_trg
     FOR EACH ROW EXECUTE FUNCTION enforce_ticket_business_match();
 ```
 
-**Índice único parcial `tickets_user_raffle_limit_idx`:** implementa `FR-PA-04` (límite de tickets por usuario y sorteo) **en la base de datos**, no en la aplicación. Dos requests concurrentes del mismo usuario no pueden crear dos tickets cuando el límite es 1. La API además valida para dar un error de negocio claro, pero la garantía dura está acá.
+**El límite de tickets por participante lo hace el trigger `tickets_max_per_user_trg`, no el índice.** Un índice único parcial con la forma `UNIQUE (raffle_id, user_id)` fija el límite en **uno**: no puede expresar "este sorteo permite dos" ni "este sorteo permite cinco". El trigger cuenta los tickets vivos del participante para ese sorteo, **bajo el lock de la fila del sorteo** —el mismo lock que usa la reserva—, y lo compara con `raffles.max_tickets_per_user`. El índice se conservó como el piso de uno y la migración `0031` lo cambió por un índice no único.
+
+El orden importa: la reserva toma el lock del sorteo, y el trigger cuenta bajo ese mismo lock. Sin el lock, dos reservas concurrentes podrían contar el mismo número de tickets y las dos pasarían.
 
 **`ip_hash`:** se guarda el hash con salt rotativo, no la IP. Sirve para rate limiting y anti-abuso sin retener un dato personal identificable en claro.
 
@@ -607,6 +609,225 @@ CREATE INDEX outbox_pending_idx ON outbox (created_at) WHERE published_at IS NUL
 
 **La tabla `outbox` es el patrón de transactional outbox**: cuando el worker de draws crea un premio y necesita notificar, escribe el evento en `outbox` **dentro de la misma transacción** que confirma el sorteo. Un proceso aparte lo publica a la cola de iii. Esto garantiza que "el sorteo se ejecutó" y "se encoló la notificación" sean atómicos — sin el outbox, un crash entre ambas deja al ganador sin avisar.
 
+### 3.17 `auth_tokens` — magic links y familias de refresh
+
+> **Añadida en la migración `0013_identity_tokens.sql`.** El esquema inicial no la tenía y el trabajo de identidad la necesita: el access token es un JWT sin estado, pero el magic link tiene que ser de un solo uso y el refresh token tiene que rotar con su familia revocada.
+
+```sql
+CREATE TABLE auth_tokens (
+    id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id      uuid REFERENCES users(id) ON DELETE CASCADE,
+    email        citext NOT NULL,
+    kind         text NOT NULL CHECK (kind IN ('magic_link','refresh')),
+    token_hash   bytea NOT NULL,
+    family_id    uuid,
+    expires_at   timestamptz NOT NULL,
+    consumed_at  timestamptz,
+    revoked_at   timestamptz,
+    created_at   timestamptz NOT NULL DEFAULT now(),
+    ip_hash      text,
+    user_agent   text
+);
+```
+
+| Decisión | Razón |
+|---|---|
+| **`email` en la fila, `user_id` nullable** | Un magic link se emite **antes** de que el usuario exista: el registro se crea al consumirlo. El `email` es la identidad previa; el `user_id` se completa en ese momento. |
+| **Solo el `token_hash`** | El token en claro existe una vez, en el email. Si la base se filtra, los tokens no son utilizables. |
+| **`consumed_at` para el magic link, `revoked_at` para el refresh** | Un magic link se *consume*; un refresh se *revoca* al rotar. La fila sobrevive a las dos operaciones: es lo que permite detectar un reuso. |
+| **`family_id`** | Agrupa la cadena de refresh. Un reuso revoca la familia entera (`FR-ID-04`). |
+
+**Índices y qué invarian cada uno:**
+
+| Índice | Invariante |
+|---|---|
+| `auth_tokens_hash_idx` (UNIQUE) | El hash de un token es único |
+| `auth_tokens_magic_link_once_idx` (parcial, UNIQUE) | Un email tiene **un solo** magic link sin consumir |
+| `auth_tokens_one_live_per_family_idx` (parcial, UNIQUE) | Una familia de refresh tiene **como máximo un token vivo** |
+
+> **Corrección posterior a la implementación.** El índice original se llamaba `auth_tokens_refresh_successor_idx` y filtraba por `consumed_at IS NOT NULL`, lo que nunca se cumplía: la rotación marca `revoked_at`, no `consumed_at`. El índice era **muerto** y su comentario describía una invariante que no existe (una familia tiene tantos tokens como rotaciones). El índice correcto es `auth_tokens_one_live_per_family_idx`: impide que dos refresh concurrentes con el mismo token produzcan dos sucesores vivos.
+
+### 3.18 Columnas añadidas a `users`
+
+| Columna | Tipo | Razón |
+|---|---|---|
+| `notification_preferences` | `jsonb NOT NULL DEFAULT '{"push":true,"email":true,"marketing":false}'` | `marketing_opt_in` solo alcanzaba para el canal de marketing. Los canales operativos (push y email) necesitan su propio lugar: un participante puede rechazar el mail promocional y aun así querer el push que le avisa que ganó. La migración `0014_notification_preferences.sql` lo agrega con un `CHECK` que valida que las tres claves existan y sean booleanas. |
+| `last_magic_link_at` | `timestamptz` | Marca la última emisión de un magic link. Todavía **no se usa**: el rate limit de `api-contract.md` §1.6 todavía no está implementado (ver `TSK-F0-09`). |
+
+---
+
+### 3.19 Desviaciones entre el documento y las migraciones
+
+Estas diferencias aparecieron al implementar el esquema y están **corregidas en el código**. Se documentan para que el contrato y la base digan lo mismo.
+
+| # | El documento decía | Lo que hace la migración | Por qué |
+|---|---|---|---|
+| 1 | `raffles.theme_id → theme_versions.id` y `tickets.validation_code_id → validation_codes.id` en la misma tabla | Las columnas se crean en `0004` / `0005` y las foreign keys en `0007` / `0009` | Son circulares: cada tabla se crea después de la otra. Los nombres son los del documento (`raffles_theme_fk`). |
+| 2 | `users_email_lower_idx` es un índice de expresión | Es `CREATE UNIQUE INDEX` | La prosa dice que "la unicidad real la garantiza el índice de expresión"; un índice no único no garantiza nada. |
+| 3 | §7.3 muestra RLS sobre dos tablas | RLS sobre **13** tablas, con dos excepciones públicas | `raffles` se puede leer cuando `status = 'published'` y `draws` cuando `seed_revealed = true`. Sin esas dos excepciones, el feed público y **la verificación pública del sorteo** —la promesa de confianza del producto— devolverían cero filas. |
+| 4 | §6.4 compara el ticket contra el consentimiento concedido más reciente | Se compara contra el registro **más reciente** de cualquier tipo, y se exige que sea una concesión | La consulta impresa en §6.4 seguía exportando el contacto de un participante que **revocó** el consentimiento después de participar. El párrafo siguiente al SQL ya describía el comportamiento correcto; ahora el SQL lo hace. |
+| 5 | `number_reservations_audit` en §3.16 | **No se crea** | §3.16 la marca "opcional, Fase 2" y §7.2 no la lista entre las 12 migraciones. |
+
+### 3.20 El propietario de la tabla esquiva las políticas de RLS
+
+**Postgres deja pasar al propietario de la tabla.** Una política de RLS no se le aplica a quien la posee, salvo que la tabla esté con `FORCE ROW LEVEL SECURITY`.
+
+Consecuencias:
+
+- **En producción, el rol de la API tiene que ser un rol sin propiedad sobre el esquema.** Si la API conecta como el dueño, el aislamiento no existe: la segunda barrera de `ADR-007` queda desactivada.
+- **Los tests de RLS tienen que conectar con un rol que no sea el propietario.** El harness crea `suertudo_test_app` para eso. Un test que conecte como `suertudo` pasaría sin demostrar nada.
+
+Las políticas **no** están con `FORCE`: el rol de la aplicación se crea en el despliegue, no en una migración, y una contraseña no pertenece a un archivo de esquema.
+
+### 3.21 `sqlx::migrate!` embebe las migraciones al compilar
+
+El macro `sqlx::migrate!("./migrations")` **incluye los archivos en el binario en tiempo de compilación**. Agregar un archivo `.sql` nuevo **no invalida el build**: el binario sigue aplicando el conjunto viejo, en silencio.
+
+**Síntoma observado:** la migración `0013` se aplicaba a la base (la tabla existía) pero no aparecía en `_sqlx_migrations`, y `sqlx::migrate` fallaba después con `42P07 relation "auth_tokens" already exists`.
+
+**Regla:** después de agregar o modificar una migración, hay que **forzar la recompilación** antes de aplicarla:
+
+```bash
+touch services/db/src/lib.rs
+cargo build -p suertudo-db --bin suertudo-db
+```
+
+Y el smoke test tiene que comprobar que `SELECT max(version) FROM _sqlx_migrations` coincide con la cantidad de archivos `.sql` del directorio.
+
+### 3.22 `token_families` — la muerte durable de una familia de refresh
+
+> **Añadida en la migración `0018_token_families.sql`, reforzada en `0026_explicit_system_context.sql`.**
+
+```sql
+CREATE TABLE token_families (
+    id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id        uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at     timestamptz NOT NULL DEFAULT now(),
+    revoked_at     timestamptz,
+    revoke_reason  text
+);
+```
+
+**Por qué hace falta una tabla propia.** Una familia de refresh era un conjunto de filas de `auth_tokens` con el mismo `family_id`, y la revocación marcaba esas filas. Eso no alcanza: una rotación concurrente puede insertar su sucesor **después** de la revocación, y el sucesor queda vivo. La familia deja de ser un conjunto de filas y pasa a ser **una fila con estado**, que es lo único que una revocación puede volver duradera.
+
+| Decisión | Razón |
+|---|---|
+| **La familia tiene estado propio** | Una revocación que solo toca filas puede ser superada por un insert posterior. Una fila con `revoked_at` no. |
+| **Un trigger rechaza el sucesor de una familia muerta** | SQLSTATE `55000`, mensaje `the refresh token family is revoked`. La garantía no depende de que la aplicación se acuerde de revisarla. |
+| **Otro trigger revoca los tokens cuando la familia muere** | La familia es la fuente de verdad; las filas son la consecuencia. |
+| **`revoke_reason`** | `logout`, `account_deleted`, `token_reuse`. La auditoría del por qué. |
+
+### 3.23 `outbox.business_id`
+
+> **Añadida en la migración `0022_outbox_rls.sql`.**
+
+El outbox es el patrón de *transactional outbox* de `ADR-002` y su payload lleva datos de tenant. **Sin una columna que diga de quién es el evento, el aislamiento no se podía ni expresar.** La columna es nullable: los eventos de plataforma no pertenecen a un negocio.
+
+### 3.24 Cinco hechos de Postgres que cambiaron el diseño
+
+Los tres aparecieron al implementar el esquema y los tres se comportan de forma distinta a la intuición.
+
+#### 1. Una política sin `WITH CHECK` concede escritura
+
+Una política con solo `USING` **cae a `USING` para `INSERT` y `UPDATE`**. Las ramas públicas de lectura —`raffles.status = 'published'`, `draws.seed_revealed = true`— se convertían en permiso de escritura: un tenant podía insertar un sorteo publicado en el negocio de otro, o un sorteo con resultado forjado.
+
+**Toda política de escritura lleva su `WITH CHECK`.** El `USING` decide qué se lee; el `WITH CHECK` decide qué se escribe.
+
+#### 2. Un trigger que lee otra tabla queda filtrado por las políticas de esa tabla
+
+`enforce_ticket_business_match()` hacía `SELECT business_id FROM raffles`. Con RLS activo y un contexto que no ve ese sorteo, el subquery devolvía `NULL`, y `NULL <> business_id` es `NULL`: el trigger **no** levantaba. La invariante era vacía exactamente en la configuración que el despliegue exige.
+
+**Un trigger que necesita ver una fila que el llamador no puede ver tiene que ser `SECURITY DEFINER` con `search_path` fijo.** Y el sustituto declarativo —una foreign key compuesta `(raffle_id, business_id)`— es la garantía que sobrevive a cualquier cambio del trigger.
+
+#### 3. Un `SET LOCAL` deja un placeholder vacío en la sesión
+
+`set_config('app.user_id', $1, true)` dentro de una transacción revertisce el valor al terminar, pero **deja un placeholder vacío a nivel de sesión**. Con el contexto de sistema marcado como la cadena vacía, una conexión que ya corrió una transacción reportaba `is_system_context() = true` para siempre: medido, **1258 participantes visibles sin contexto** en una conexión reusada.
+
+**El contexto de sistema tiene un marcador propio** (`'system'`), distinto de la cadena vacía. Ahora "sin contexto" (el GUC sin definir o con el placeholder vacío) y "contexto de sistema" son dos estados distintos, y el primero **falla cerrado**.
+
+```sql
+-- 0026_explicit_system_context.sql
+CREATE OR REPLACE FUNCTION is_system_context() RETURNS boolean
+    LANGUAGE sql STABLE AS $$
+    SELECT COALESCE(current_setting('app.business_id', true), '') = 'system'
+       AND COALESCE(current_setting('app.user_id', true), '') = 'system'
+$$;
+```
+
+`current_business_id()` y `current_user_id()` tienen que ignorar el marcador: el sistema no es un tenant.
+
+#### Un cuarto hecho, sobre el `UPDATE`
+
+Un `UPDATE` exige que **la fila nueva** satisfaga tanto el `WITH CHECK` de las políticas de `UPDATE` como las políticas de `SELECT` de la tabla. Una fila anonimizada —`user_id = NULL`— deja de ser visible para el participante que la anonimiza, así que **no puede escribirla**. Por eso la anonimización es la función `anonymise_user_tickets(uuid)` (`SECURITY DEFINER`) y no un `UPDATE` común.
+
+#### Y un quinto, sobre el `ON CONFLICT`
+
+Un `INSERT` con un **arbiter** explícito (`ON CONFLICT (columna) WHERE ...`) hace que Postgres evalúe las políticas de `UPDATE` contra la fila nueva. Un magic link todavía no tiene dueño, así que la política de `UPDATE` lo rechaza y el `INSERT` falla con una violación de RLS. El `ON CONFLICT DO NOTHING` sin arbiter no lo hace.
+
+**En `auth_tokens` no se usa un arbiter.** Es una restricción del esquema, no un detalle de la consulta.
+
+### 3.25 Los SQLSTATE del dominio
+
+La base rechaza con un código estable, y el worker lo traduce al código del catálogo de `docs/api-contract.md` §1.4. La traducción vive en `services/identity/src/adapters/mod.rs` (`storage_failure`) y en `domain::errors::Refusal`.
+
+| SQLSTATE | Significado | HTTP | Código de §1.4 |
+|---|---|---|---|
+| `PT001` | El participante llegó al límite de tickets del sorteo | 409 | `TICKET_LIMIT_REACHED` |
+| `PT002` | El sorteo no está abierto (es un `draft`) | 409 | `RAFFLE_NOT_OPEN` |
+| `PT003` | El sorteo no acepta más reservas o cancelaciones | 409 | `RAFFLE_CLOSED` |
+| `PT004` | El número ya está reservado | 409 | `NUMBER_TAKEN` |
+| `PT005` | La cantidad de números está fuera de rango | 422 | `TICKET_SIZE_OUT_OF_RANGE` |
+| `42501` | El que llama no es el dueño de la fila | 403 | `RBAC_FORBIDDEN` |
+| `55000` | La familia de refresh está revocada | 401 | `AUTH_REQUIRED` |
+| `23503` | La fila referenciada no existe | 404 | `NOT_FOUND` |
+| `23505` | Violación de unicidad | 409 | `CONFLICT` |
+
+**Un rechazo que se convierte en `500` es un rechazo que el cliente no puede manejar.** Por eso el SQLSTATE se traduce antes de llegar a la respuesta, y el mensaje de la base va a `details.reason` mientras el mensaje de la respuesta es el del catálogo, en español.
+
+### 3.26 Las funciones que escriben una fila de tenant
+
+Una tabla con `business_id` solo la escribe el dueño de la fila o la plataforma. Los caminos que legítimamente cruzan ese límite son funciones `SECURITY DEFINER` de cuerpo fijo, y **todas atan al que llama**: una función que muta una fila de tenant sin atar al que llama es una escritura cruzada sin límite.
+
+| Función | Qué hace | Migración |
+|---|---|---|
+| `register_user(email, display_name)` | El alta del participante | `0023` |
+| `find_user_by_email(email)` | Resuelve un correo en la fila del participante | `0023` |
+| `find_token_by_hash(hash)` | Resuelve un hash de token en su fila | `0023` |
+| `consume_magic_link(id)` | Consume el enlace mágico una sola vez | `0023` |
+| `bind_magic_link_user(id, user_id)` | Asocia el enlace consumido con la cuenta | `0023` |
+| `revoke_pending_magic_links(email)` | Revoca los enlaces pendientes de un correo | `0023` |
+| `register_business(slug, name, category, user_id)` | El alta del negocio con su dueño | `0028` |
+| `insert_magic_link(email, hash, expires_at)` | La emisión del enlace mágico | `0028` |
+| `register_push_device(user_id, platform, token, app_version)` | El alta de un dispositivo | `0029` |
+| `record_consent(user_id, business_id, scope, granted, source, user_agent)` | El consentimiento, append-only | `0028` |
+| `reserve_ticket(raffle_id, user_id, code, numbers[])` | La reserva atómica de números | `0028` |
+| `create_prize(raffle_id, draw_id, business_id, user_id, name, winning_number)` | El premio sobre un sorteo ya sorteado | `0028` |
+| `apply_reservation_counters(ticket_id)` | **Recalcula** los contadores del sorteo desde la verdad | `0032` |
+| `anonymise_user_tickets(user_id)` | Anonimiza los tickets de un participante | `0020` |
+| `anonymise_user_devices(user_id)` | Anonimiza los dispositivos de un participante | `0029` |
+
+**`apply_reservation_counters` recalcula, no incrementa.** Un contador que se recalcula desde la verdad no puede desviarse y es idempotente por construcción; uno que se incrementa puede ser movido por cualquiera que pueda llamar a la función.
+
+### 3.27 Lo que falta: `claim_prize`
+
+`FR-DR-08` y `POST /v1/me/prizes/{prize_id}/claim` **no tienen camino todavía**. Con `prizes_update` atada al dueño del negocio, el ganador no puede mover su propio premio de `pending` a `claimed`.
+
+La función que falta, con la forma de las de `0028`:
+
+```sql
+claim_prize(p_prize_id uuid, p_user_id uuid, p_claim_code text) RETURNS void
+```
+
+| Requisito | Cómo se cumple |
+|---|---|
+| El premio es del que reclama | `SELECT … FOR UPDATE` y `user_id = p_user_id`; si no, `23503` → `404 NOT_FOUND` |
+| El que llama es el dueño | `42501` → `403 RBAC_FORBIDDEN` |
+| El premio se puede reclamar | `status = 'pending' AND claimed_at IS NULL`; si no, un SQLSTATE nuevo → `409 CONFLICT` |
+| El código de canje es único | `claim_code` es `UNIQUE`; un duplicado da `23505` → `409 CONFLICT` |
+| Solo se escribe el reclamo | `status`, `claim_code`, `claimed_at`, `updated_at`. Un trigger deja el resto de la fila intacto y prohíbe cualquier otra transición del participante |
+
+El código de canje lo genera el que llama, igual que `reserve_ticket` recibe `p_code`: la función no inventa el formato.
+
 ---
 
 ## 4. Máquinas de estado
@@ -676,7 +897,7 @@ queued ──> sending ──> sent
 | Índice | Consulta que sirve | Por qué existe |
 |---|---|---|
 | `ticket_numbers UNIQUE (raffle_id, number)` | Integridad de números | La constraint más importante del producto |
-| `tickets_user_raffle_limit_idx` (parcial) | Límite de tickets por usuario | Garantía atómica de `FR-PA-04` |
+| `tickets_user_raffle_limit_idx` (parcial, **no único**) | Índice de apoyo del límite por participante | El límite real lo cuenta `tickets_max_per_user_trg` |
 | `raffles_status_closes_idx` (parcial) | Job de cierre + feed público | Evita escanear sorteos anulados |
 | `raffles_draws_at_idx` (parcial, `status='closed'`) | Job de sorteo | El worker pregunta "¿qué sorteos debo sortear?" cada minuto |
 | `consent_records_business_idx` (parcial) | Export CSV / panel de fidelización | Camino caliente de monetización |
@@ -824,19 +1045,35 @@ WHERE raffle_id = $1 AND status <> 'cancelled';
 ### 7.2 Orden de creación
 
 ```
-0001_extensions.sql        -- pgcrypto, citext, pg_trgm
-0002_users.sql             -- users, push_devices
-0003_businesses.sql        -- businesses, business_members
-0004_raffles.sql           -- raffles
-0005_tickets.sql           -- tickets, ticket_numbers + trigger de business match
-0006_draws.sql             -- draws, prizes
-0007_themes.sql            -- theme_versions, ai_generations
-0008_notifications.sql     -- notifications
-0009_consents.sql          -- consent_records, validation_codes
-0010_audit.sql             -- audit_log + reglas append-only
-0011_outbox.sql            -- outbox
-0012_rls.sql               -- políticas de Row Level Security (ADR-007)
+0001_extensions.sql                -- pgcrypto, citext, pg_trgm
+0002_users.sql                     -- users, push_devices
+0003_businesses.sql                -- businesses, business_members
+0004_raffles.sql                   -- raffles
+0005_tickets.sql                   -- tickets, ticket_numbers + trigger de business match
+0006_draws.sql                     -- draws, prizes
+0007_themes.sql                    -- theme_versions, ai_generations
+0008_notifications.sql             -- notifications
+0009_consents.sql                  -- consent_records, validation_codes
+0010_audit.sql                     -- audit_log + reglas append-only
+0011_outbox.sql                    -- outbox
+0012_rls.sql                       -- políticas de Row Level Security (ADR-007)
+0013_identity_tokens.sql           -- auth_tokens: magic links y familias de refresh
+0014_notification_preferences.sql  -- users.notification_preferences
+0015_rls_write_policies.sql        -- WITH CHECK en las políticas + RLS de audit_log
+0016_ticket_integrity.sql          -- trigger SECURITY DEFINER + FK compuesta de tickets
+0017_audit_log_append_only.sql     -- el append-only pasa de rule a trigger
+0018_token_families.sql            -- token_families + trigger de familia viva
+0019_tickets_anonymisation_policy.sql
+0020_ticket_anonymisation_function.sql -- anonymise_user_tickets()
+0021_raffle_business_foreign_keys.sql  -- FK compuesta de draws y prizes
+0022_outbox_rls.sql               -- outbox.business_id + sus políticas
+0023_identity_tables_rls.sql      -- RLS de users/auth_tokens + funciones del login
+0024_published_raffle_tickets.sql  -- un ticket solo existe en un sorteo publicado
+0025_participant_cancellation.sql -- FR-PA-07: cancelar y liberar los números
+0026_explicit_system_context.sql  -- marcador explícito del contexto de sistema
 ```
+
+`0001` a `0014` son el esquema inicial. Las de `0015` en adelante son las correcciones que impuso la verificación independiente: políticas de escritura, integridad entre negocio y sorteo, muerte durable de una familia de refresh, y el marcador del contexto de sistema.
 
 ### 7.3 Row Level Security (defensa en profundidad)
 
@@ -855,7 +1092,11 @@ USING (
 
 La API setea `app.business_id` y `app.user_id` en cada transacción (`SET LOCAL`). Cuando la sesión no las define, `current_setting(..., true)` devuelve `NULL` y la política no matchea: **fail closed**.
 
-> **Nota de alcance:** RLS no cubre la tabla `users` (los participantes son usuarios, no recursos de un tenant) ni las tablas de plataforma (`audit_log`, `outbox`). Esas se protegen por permisos de rol de Postgres: la conexión de la API no tiene `UPDATE` ni `DELETE` sobre `audit_log`.
+> **Nota de alcance, actualizada:** RLS cubre **las 18 tablas**. `users`, `auth_tokens` y `token_families` también, pero su aislamiento no se expresa con políticas: el login no tiene contexto de tenant, así que usa funciones `SECURITY DEFINER` de cuerpo fijo (`register_user`, `find_user_by_email`, `find_token_by_hash`, `consume_magic_link`, `bind_magic_link_user`, `revoke_pending_magic_links`).
+>
+> Las únicas dos escrituras que un participante puede hacer sobre una fila de otro dueño son las dos que el producto le concede, y las dos están acotadas por un trigger: **cancelar su propio ticket** (`FR-PA-07`) y **marcar como leída su propia notificación**.
+>
+> `audit_log` sigue sin `UPDATE` ni `DELETE` para el rol de la aplicación: eso lo garantiza el trigger append-only, no la política.
 
 ---
 
@@ -878,7 +1119,7 @@ La API setea `app.business_id` y `app.user_id` en cada transacción (`SET LOCAL`
 
 ## 9. Checklist de implementación
 
-- [ ] Las 16 tablas creadas con sus constraints, índices y comentarios.
+- [x] Las 18 tablas creadas con sus constraints, índices y comentarios.
 - [ ] `trigger tickets_business_match_trg` activo y testeado con un caso negativo.
 - [ ] Reglas append-only de `audit_log` activas y testeadas.
 - [ ] `UNIQUE (raffle_id, number)` testeada bajo concurrencia (dos reservas simultáneas del mismo número).

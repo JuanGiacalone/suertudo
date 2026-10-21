@@ -146,6 +146,12 @@ Every transaction sets the tenant context with `SET LOCAL`
 policies fail **closed**: the query sees no rows. A missing context is a
 bug, not an open door.
 
+**The role the application connects with must not own the schema.** Postgres
+does not apply the RLS policies to the owner of a table. If the API
+connects as the role that created the schema, the second barrier does not
+exist. The application role is created at deploy time, never in a
+migration.
+
 ### 5.3 Migrations are never edited
 
 A migration that has been merged is immutable. To change the schema you add a
@@ -159,10 +165,19 @@ application:**
 |---|---|
 | A number can only be reserved once per raffle | `UNIQUE (raffle_id, number)` on `ticket_numbers` |
 | A raffle is drawn exactly once | `UNIQUE (raffle_id)` on `draws` |
-| A participant has at most N tickets per raffle | partial unique index on `tickets (raffle_id, user_id)` |
+| A participant has at most N tickets per raffle | trigger `tickets_max_per_user_trg` — a unique index cannot express a configurable limit |
 
 If you need a new invariant, add it as a constraint. A check in the handler
 is a suggestion; a constraint is a guarantee.
+
+**A table with a `business_id` is only written by the tenant that owns the
+row.** The paths that legitimately cross that boundary are `SECURITY DEFINER`
+functions that **bind the caller**: a function that mutates a tenant row
+without checking who is calling is a cross-tenant write without a limit.
+
+**`sqlx::migrate!` embeds the migration files at compile time.** Adding a
+`.sql` file does not invalidate the build. After adding or changing a
+migration, `touch services/db/src/lib.rs` and rebuild.
 
 ### 5.4 The commit–reveal formula is frozen
 
@@ -290,6 +305,16 @@ These are not folklore. Each one was hit and fixed.
 | The engine logs `trigger type X is not registered` | The trigger is `PENDING` forever and the symptom is a feature that never runs | Assert on that log line in the smoke test |
 | A golden value written by hand | The test fails for the wrong reason | Compute it with a second implementation |
 | The queue DLQ on the `rabbitmq` transport | Dead letters are unreachable from iii | The production transport is `builtin` (`ADR-013`) |
+| `sqlx::migrate!` embeds the migration files at compile time | A new `.sql` file is applied silently as if it did not exist | `touch services/db/src/lib.rs` and rebuild before applying |
+| The owner of a Postgres table bypasses its RLS policies | The isolation looks enabled and is not | Connect with a role that does not own the schema |
+| `#[tokio::test]` runs on a single thread | A test that pretends to reproduce a race does not reproduce it | Reproduce the state the loser finds, or test the contract the fix relies on |
+| An RLS policy without `WITH CHECK` | The `USING` expression becomes the write permission | Every write policy needs its own `WITH CHECK` |
+| A trigger that reads another table | That read is filtered by the RLS of the table, and the invariant goes silent | `SECURITY DEFINER` with a fixed `search_path`, plus a composite foreign key |
+| A `SET LOCAL` leaves an empty placeholder on the session | A pooled connection reports the system context forever after | The system context has its own marker (`'system'`), never the empty string |
+| A test that connects as the owner of the schema | Every RLS policy is bypassed and the test proves nothing | Run the isolation tests with the role of the deployment |
+| A write policy with `OR user_id = current_user_id()` on a table that also has `business_id` | The branch is not bound to the business: a participant writes into another tenant's rows | Bind every write policy to the owner of the row, and route the legitimate paths through a `SECURITY DEFINER` function |
+| A `SECURITY DEFINER` function that does not bind the caller | It is an unbounded cross-tenant write | Check `current_user_id()` inside the function, or refuse |
+| A `SECURITY DEFINER` function that increments a counter | It drifts from the truth and it is not idempotent | Recompute the counter from the truth |
 
 ---
 

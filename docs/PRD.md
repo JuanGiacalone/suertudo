@@ -580,6 +580,8 @@ Base legal: **consentimiento explícito** (art. 5 de la Ley 25.326). Se aplica p
 | Nombre y logo del negocio | Público | Público por diseño |
 | Prompt de IA del negocio | El propio negocio y la plataforma | No se comparte con otros negocios |
 
+**El registro de auditoría guarda el hecho del cambio, nunca el valor.** La fila dice qué campo cambió, no qué tenía antes ni qué tiene ahora. Un historial que guarda los valores es un historial que duplica la PII y que hay que anonimizar aparte.
+
 **Derechos del titular:** acceso, rectificación, supresión, portabilidad y revisión de decisiones automatizadas. El MVP implementa acceso, portabilidad, rectificación y supresión; la revisión de decisiones automatizadas aplica hoy solo a la generación de temas, que es un proceso que el usuario puede editar, revisar y revertir.
 
 ### 11.2 El shuffle y la confianza

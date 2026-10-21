@@ -6,7 +6,9 @@
 **/.iii/
 worker-compose.lock
 # El cache de sqlx SI se commitea: es lo que hace el build reproducible
-# sin una base de datos.
+# sin una base de datos. Sin el, `cargo build` en un checkout limpio
+# falla con errores de compilacion de los macros query!.
+!.sqlx/
 
 # Node
 node_modules/
