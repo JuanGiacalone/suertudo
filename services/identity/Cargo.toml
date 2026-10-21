@@ -19,6 +19,12 @@ workspace = true
 
 [dependencies]
 suertudo-db = { path = "../db" }
+# The identity worker reuses the authorization context of the API worker: the
+# `AuthContext` type and the `inject` / `extract` helpers live there and must
+# not be duplicated (AGENTS.md §5.2).
+suertudo-api = { path = "../api" }
+
+sqlx = { workspace = true }
 
 iii-sdk = { workspace = true }
 

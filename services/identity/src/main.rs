@@ -4,10 +4,25 @@
 //! engine. See `docs/api-contract.md` §3 for the endpoint contracts and
 //! `docs/architecture.md` ADR-002 for why the engine is behind an HTTP
 //! contract rather than in front of it.
+//!
+//! The configuration is read before anything else: a worker that starts with
+//! the wrong secrets is worse than a worker that does not start at all.
+
+use std::sync::Arc;
 
 use iii_sdk::protocol::RegisterTriggerInput;
 use iii_sdk::{InitOptions, RegisterFunction, register_worker};
 use serde_json::{Value, json};
+use suertudo_db::pool;
+
+use suertudo_identity::adapters::{
+    Hs256TokenSigner, PostgresConsentRepository, PostgresDeviceRepository, PostgresTokenRepository,
+    PostgresUserRepository, RandomTokenSource, Sha256Digest, SystemClock,
+};
+use suertudo_identity::config::Config;
+use suertudo_identity::domain::service::IdentityService;
+use suertudo_identity::handlers::Deps;
+use suertudo_identity::middleware::SessionResolver;
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
@@ -16,6 +31,37 @@ async fn main() -> Result<(), anyhow::Error> {
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
+
+    // The startup check happens here: outside development the worker refuses
+    // to start when the magic link travels in the response.
+    let config =
+        Config::from_env().map_err(|err| anyhow::anyhow!("invalid configuration: {err}"))?;
+
+    let pool = Arc::new(pool::connect(&config.database_url, config.pool_max_connections).await?);
+
+    let clock = Arc::new(SystemClock);
+    let signer = Arc::new(Hs256TokenSigner::new(
+        config.jwt_secret.as_bytes(),
+        config.jwt_refresh_secret.as_bytes(),
+        clock.clone(),
+    ));
+
+    let service = Arc::new(IdentityService {
+        users: Arc::new(PostgresUserRepository::new(pool.clone())),
+        tokens: Arc::new(PostgresTokenRepository::new(pool.clone())),
+        devices: Arc::new(PostgresDeviceRepository::new(pool.clone())),
+        consents: Arc::new(PostgresConsentRepository::new(pool.clone())),
+        clock: clock.clone(),
+        token_source: Arc::new(RandomTokenSource),
+        digest: Arc::new(Sha256Digest),
+        signer: signer.clone(),
+    });
+
+    let deps = Arc::new(Deps {
+        service,
+        resolver: SessionResolver::new(signer),
+        dev_magic_link: config.dev_magic_link,
+    });
 
     let url = std::env::var("III_URL").unwrap_or_else(|_| "ws://127.0.0.1:49134".to_string());
     let namespace = std::env::var("III_NAMESPACE").unwrap_or_else(|_| "suertudo".to_string());
@@ -28,7 +74,7 @@ async fn main() -> Result<(), anyhow::Error> {
         },
     );
 
-    suertudo_identity::handlers::register(&worker)?;
+    suertudo_identity::handlers::register(&worker, &deps)?;
 
     worker.register_function(
         "identity::ping",
@@ -44,7 +90,9 @@ async fn main() -> Result<(), anyhow::Error> {
         trigger_namespace: None,
     })?;
 
-    tracing::info!(%url, "suertudo-identity registered");
+    tracing::info!(%url, environment = config.environment.as_str(), "suertudo-identity registered");
+    // A worker that returns from main dies: the threads of the runtime do
+    // not keep the process alive (AGENTS.md §5.8).
     std::thread::park();
     Ok(())
 }
