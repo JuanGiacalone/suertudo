@@ -72,13 +72,23 @@ jobs:
         run: |
           version="$(grep '^iii=' infra/iii/VERSION | cut -d= -f2)"
           if [ -z "$version" ]; then
-            echo "::error::infra/iii/VERSION does not declare the engine version"
+            echo "::error::infra/iii/VERSION does not declare the engine version (the key is 'iii=')"
             exit 1
           fi
           curl -fsSL https://install.iii.dev/iii/main/install.sh \
             | sh -s -- --non-interactive "$version"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          iii --version
+          # The installed engine has to BE the declared one. An emptiness
+          # check is not enough: a version that resolves to something else
+          # installs something else, and the job would run against an engine
+          # that nobody declared. The last field is the version, which is
+          # how the installer itself reads it.
+          installed="$(iii --version | awk '{print $NF}')"
+          if [ "$installed" != "$version" ]; then
+            echo "::error::the installed engine is $installed and the declared one is $version"
+            exit 1
+          fi
+          echo "engine $installed, the declared one"
 
       - name: The stack comes up, and the routes answer
         # The engine, the registry workers, the queue, the cron and the
