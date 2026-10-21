@@ -809,6 +809,8 @@ Una tabla con `business_id` solo la escribe el dueño de la fila o la plataforma
 | `reserve_ticket(raffle_id, user_id, code, numbers[])` | La reserva atómica de números | `0028` |
 | `create_prize(raffle_id, draw_id, business_id, user_id, name, winning_number)` | El premio sobre un sorteo ya sorteado | `0028` |
 | `apply_reservation_counters(ticket_id)` | **Recalcula** los contadores del sorteo desde la verdad | `0032` |
+
+Los contadores los escribe **la base**: el contexto de sistema o las funciones `SECURITY DEFINER` del esquema. Un tenant que los escriba recibe `42501`. La razón está en `0041`: el trigger tiene que reconocer al contexto de sistema, o un job de la plataforma que recalculara los contadores in situ sería rechazado.
 | `anonymise_user_tickets(user_id)` | Anonimiza los tickets de un participante | `0020` |
 | `anonymise_user_devices(user_id)` | Anonimiza los dispositivos de un participante | `0029` |
 | `change_user_password(user_id, hash)` | **Todavía no existe.** `email` y `password_hash` son columnas de plataforma congeladas para el participante, así que el cambio de contraseña necesita una función de este tipo. | — |
@@ -1092,6 +1094,7 @@ WHERE raffle_id = $1 AND status <> 'cancelled';
 0038_push_device_ownership.sql    -- un token de dispositivo no se roba
 0039_bind_magic_link_user.sql     -- el enlace se ata a su dueño y a su correo
 0040_raffle_counters_immutable.sql -- los contadores los escribe la base
+0041_counters_system_context.sql -- el contexto de sistema también recalcula
 ```
 
 `0001` a `0014` son el esquema inicial. Las de `0015` en adelante son las correcciones que impuso la verificación independiente: políticas de escritura, integridad entre negocio y sorteo, muerte durable de una familia de refresh, y el marcador del contexto de sistema.

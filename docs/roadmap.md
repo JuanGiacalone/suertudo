@@ -68,7 +68,9 @@ Los PRs encadenados se apilan así: `PR-1` (base) → `PR-2` (apila sobre `PR-1`
 
 > **Estado:** completadas `TSK-F0-01` a `TSK-F0-04` y `TSK-F0-06`. El spike `spikes/iii-health` validó el engine, los workers del registro (`http`, `queue`, `cron`), un worker Rust propio, la ruta HTTP completa, **la ruta de colas y cron completa** y **los dos transportes de cola**, **sin KVM**. También fijó las versiones de iii (engine 0.24.6 + SDK 0.24.6), decidió el transporte de producción (`builtin`, `ADR-013`) y entregó el golden test de la derivación commit–reveal. Ver [`spike-iii-health.md`](./spike-iii-health.md) para el porqué, la mecánica y los hallazgos.
 >
-> **Abiertas:** `TSK-F0-05` (CI), `TSK-F0-07` (rate limits), `TSK-F0-08` (envío real del magic link), `TSK-F0-09` (rol de aplicación y smoke test del backend).
+> **Abiertas:** `TSK-F0-05` (CI), `TSK-F0-07` (rate limits), `TSK-F0-08` (envío real del magic link), `TSK-F0-09` (rol de aplicación y smoke test del backend), `TSK-F0-10` (el token de dispositivo y la clase del error).
+>
+> **Una función de la base falta todavía:** `claim_prize(p_prize_id, p_user_id, p_claim_code)`, sin la cual `FR-DR-08` y `POST /v1/me/prizes/{prize_id}/claim` no tienen camino. La especificación está en `docs/data-model.md` §3.27.
 
 ---
 
@@ -176,6 +178,29 @@ README.md
 - `sqlx::migrate!` **embebe los archivos al compilar**: agregar una migración no invalida el build y el binario aplica el conjunto viejo en silencio. `data-model.md` §3.21.
 
 **Fuera de su alcance, con dueño asignado:** el login del comercio con contraseña (`FR-ID-02`) es `TSK-F1-01`.
+
+---
+
+### `TSK-F0-10` — El token de dispositivo y la clase del error
+
+**Épica:** E0.10 · **Depende de:** `TSK-F0-04` · **Esfuerzo:** 0,5 d
+
+**Contexto:** el token de un dispositivo push identifica **un teléfono**, no a una persona. Hoy la fila de `push_devices` guarda el `user_id` de quien la registró, y `register_push_device` rechaza con `42501` el token que ya es de otro. El escenario real: la misma persona se da de baja y crea otra cuenta en el mismo teléfono. La cuenta nueva **pierde el push en silencio**, y el error que recibe es `403 RBAC_FORBIDDEN`, que dice "tu rol no alcanza" y no dice nada del teléfono.
+
+**Decisión de producto pendiente.** Hay dos caminos y la elección es del dominio:
+
+| Camino | Qué resuelve | Qué cuesta |
+|---|---|---|
+| **Liberar los dispositivos al cerrar sesión** | La cuenta nueva registra el token sin conflicto | El push de la sesión anterior deja de llegar en cuanto se cierra |
+| **Transferir el token cuando el dueño anterior no tiene sesión viva** | El teléfono pasa a la cuenta nueva y el push sigue llegando | Hay que definir qué es "sesión viva" y probar la carrera |
+
+Lo que **no** hay que hacer es volver a permitir que cualquiera re-apunte el token de otro: eso fue el defecto `F-3` y abre el secuestro de notificaciones.
+
+**Criterios de aceptación:**
+- [ ] Está decidido qué pasa con el token de un dispositivo cuando su dueño cierra sesión.
+- [ ] El error es un `409 CONFLICT` con un código propio, no un `403 RBAC_FORBIDDEN`: el cliente tiene que poder explicar qué hacer.
+- [ ] `docs/api-contract.md` §1.4 tiene el código nuevo.
+- [ ] El token de otro sigue sin poder robarse.
 
 ---
 
@@ -685,7 +710,7 @@ Backlog abierto, priorizado por evidencia del uso real.
 
 | Fase | Épicas | Tareas detalladas | Esfuerzo | Riesgo principal |
 |---|---|---|---|---|
-| 0 — Cimientos | 9 | 9 | ~10,5 d | El rol de aplicación sin propiedad del esquema (`TSK-F0-09`) |
+| 0 — Cimientos | 10 | 10 | ~11 d | El rol de aplicación sin propiedad del esquema (`TSK-F0-09`) |
 | 1 — MVP vertical | 10 | 25 | ~42 d | La reserva transaccional (`TSK-F1-12`) |
 | 2 — Crecimiento | 10 | por detallar | ~30 d | Cobro de la suscripción |
 | 3 — Expansión | 8 | por detallar | ~40 d+ | Dependencia de terceros (lotería, CRM) |

@@ -721,3 +721,111 @@ async fn the_catalogue_test_covers_the_exceptions() -> Result<(), Box<dyn std::e
 
     Ok(())
 }
+
+/// The platform can recompute the counters of a raffle.
+///
+/// The tenant cannot: that is the guarantee of `0040`. But the platform can,
+/// and the trigger has to honour the system context the way its own comment
+/// says. Without the branch, a platform job that recomputes the counters in
+/// place would be refused with `42501`.
+#[tokio::test]
+async fn the_platform_can_recompute_the_counters_of_a_raffle()
+-> Result<(), Box<dyn std::error::Error>> {
+    let pool = test_pool().await?;
+    ensure_app_role(&pool).await?;
+
+    let business_id = seed_business(&pool).await?;
+    let raffle_id = seed_raffle(&pool, business_id, "published").await?;
+
+    with_app_system(&pool, |tx| {
+        Box::pin(async move {
+            sqlx::query("UPDATE raffles SET numbers_reserved = 5, tickets_count = 3 WHERE id = $1")
+                .bind(raffle_id)
+                .execute(&mut **tx)
+                .await?;
+            Ok(())
+        })
+    })
+    .await?;
+
+    let (numbers, tickets): (i32, i32) =
+        sqlx::query_as("SELECT numbers_reserved, tickets_count FROM raffles WHERE id = $1")
+            .bind(raffle_id)
+            .fetch_one(&pool)
+            .await?;
+
+    assert_eq!(numbers, 5, "the platform could not recompute the counters");
+    assert_eq!(tickets, 3, "the platform could not recompute the counters");
+    Ok(())
+}
+
+/// A participant cannot change the email or the password of its own account.
+///
+/// `status` and `deleted_at` have their own tests. These two are the same
+/// class of refusal, and a regression on them would not be caught without a
+/// test of their own.
+#[tokio::test]
+async fn a_participant_cannot_change_the_email_or_the_password_of_their_own_account()
+-> Result<(), Box<dyn std::error::Error>> {
+    let pool = test_pool().await?;
+    ensure_app_role(&pool).await?;
+
+    let user_id = seed_user(&pool).await?;
+
+    // The email.
+    let err = match with_app_participant(&pool, user_id, |tx| {
+        Box::pin(async move {
+            sqlx::query("UPDATE users SET email = 'back@example.test' WHERE id = $1")
+                .bind(user_id)
+                .execute(&mut **tx)
+                .await?;
+            Ok(())
+        })
+    })
+    .await
+    {
+        Ok(_) => return Err("the participant changed the email of their own account".into()),
+        Err(err) => err,
+    };
+    assert_eq!(
+        sqlstate(&err).as_deref(),
+        Some("42501"),
+        "the refusal of the email did not carry the mapped SQLSTATE: {err}"
+    );
+
+    // The password.
+    let err = match with_app_participant(&pool, user_id, |tx| {
+        Box::pin(async move {
+            sqlx::query("UPDATE users SET password_hash = 'forged-hash' WHERE id = $1")
+                .bind(user_id)
+                .execute(&mut **tx)
+                .await?;
+            Ok(())
+        })
+    })
+    .await
+    {
+        Ok(_) => return Err("the participant changed the password of their own account".into()),
+        Err(err) => err,
+    };
+    assert_eq!(
+        sqlstate(&err).as_deref(),
+        Some("42501"),
+        "the refusal of the password did not carry the mapped SQLSTATE: {err}"
+    );
+
+    // The profile is still writable: the freeze is of the platform columns
+    // only.
+    with_app_participant(&pool, user_id, |tx| {
+        Box::pin(async move {
+            sqlx::query("UPDATE users SET display_name = 'New name' WHERE id = $1")
+                .bind(user_id)
+                .execute(&mut **tx)
+                .await?;
+            Ok(())
+        })
+    })
+    .await?;
+
+    Ok(())
+}
