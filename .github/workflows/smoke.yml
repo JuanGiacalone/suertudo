@@ -62,8 +62,19 @@ jobs:
         # engine that the project declares and not the latest one. The
         # version of the engine and the version of the SDK move together, in
         # the same pull request.
+        #
+        # The version is checked for emptiness on purpose. `bash -e` without
+        # `pipefail` masks a failing `grep` behind the successful `cut`, so
+        # a renamed key would produce an empty version, the installer would
+        # resolve the LATEST engine, `iii --version` would succeed, and the
+        # job would run against an engine nobody declared. That is exactly
+        # the class of failure this workflow exists to catch.
         run: |
           version="$(grep '^iii=' infra/iii/VERSION | cut -d= -f2)"
+          if [ -z "$version" ]; then
+            echo "::error::infra/iii/VERSION does not declare the engine version"
+            exit 1
+          fi
           curl -fsSL https://install.iii.dev/iii/main/install.sh \
             | sh -s -- --non-interactive "$version"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"

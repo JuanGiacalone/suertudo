@@ -6,18 +6,21 @@
 # really answering.
 #
 # It proves, on a host WITHOUT KVM, that:
-#   1. the iii engine starts and listens on 49134
-#   2. the registry `http` worker runs as a host process (no microVM)
-#   3. a Rust worker registers a function and an http trigger
-#   4. GET /v1/health returns 200 through the engine
-#   5. the function is callable directly through the engine
-#   6. the queue worker registers `durable:subscriber` and `engine::queue::*`
-#   7. a published message reaches its subscriber
-#   8. a named function queue accepts TriggerAction::Enqueue
-#   9. a failing consumer retries 3 times, then dead-letters
-#  10. the DLQ can be listed, redriven and discarded
-#  11. a cron trigger actually fires
-#  12. the golden test of the derivation holds
+#   0. there is no stale iii process from a previous run
+#   1. the state of KVM is known (the stack does not need it)
+#   2. the iii engine starts and listens on 49134
+#  2b. the queue transport under test is the one that was asked for
+#   3. the registry workers (http, queue, cron) reach the state `ready`
+#   4. a Rust worker registers a function and an http trigger
+#   5. GET /v1/health returns 200 through the engine
+#   6. the function is callable directly through the engine
+#   7. no microVM was used at any moment of the run
+#   8. a published message reaches its subscriber
+#   9. a named function queue accepts TriggerAction::Enqueue
+#  10. a failing consumer retries 3 times, then dead-letters
+#  11. the DLQ can be listed, redriven and discarded
+#  12. a cron trigger actually fires
+#  13. the golden test of the derivation holds
 #
 # The probe worker and the engine configuration live in
 # `spikes/iii-health/`, which is where the experiment that answered the
@@ -43,7 +46,10 @@ cd "$SPIKE_DIR" || exit 1
 # binary does not exist yet, and a script that needs a binary built by hand
 # is a script that only works on the machine of whoever wrote it.
 echo "Compilando el worker de prueba..."
-if ! cargo build --quiet --bin iii-health-spike; then
+# `--locked`: without it, cargo is free to re-resolve the dependencies of
+# the spike, and the pipeline would be testing a tree that is not the one
+# that is committed.
+if ! cargo build --quiet --locked --bin iii-health-spike; then
   echo "    FALLO: no se pudo compilar el worker de prueba"
   exit 1
 fi

@@ -267,7 +267,19 @@ README.md
 - El check del cache de sqlx: limpio con el esquema actual, y **con dientes** — al cambiar una query a mano, el check lo detectó.
 - Flutter: `analyze` sin hallazgos, `format` sin cambios, 1 test verde.
 - Next.js: `lint` limpio, `tsc --noEmit` sin errores, `build` OK.
-- `unshare -rm ./scripts/smoke.sh`: **PASS**, las trece secciones en verde.
+- `unshare -rm ./scripts/smoke.sh`: **PASS**, las quince secciones en verde.
+
+**Revisión independiente:** el pipeline pasó por la revisión nativa de Gentle AI, con riesgo alto y tres lentes —riesgo, legibilidad y fiabilidad—. Salió **aprobada**. Un hallazgo crítico fue **refutado**: decía que el job de Rust no exporta la base y que los macros de sqlx no expandían sin ella, y es falso —el build cae al cache commiteado sin `DATABASE_URL`, y está verificado—. Los veinticuatro hallazgos restantes son advertencias informativas.
+
+**Lo que se corrigió después de la revisión:**
+- El motor se instala con la versión declarada, y ahora el paso **verifica que la versión no esté vacía**. `bash -e` sin `pipefail` enmascara un `grep` fallido detrás del `cut` exitoso: una clave renombrada instalaba el **último** motor en silencio, que es exactamente la clase de fallo que este pipeline existe para atrapar.
+- Todos los comandos de cargo van con `--locked`. Sin eso, cargo puede re-resolver las dependencias, y el pipeline auditaría y probaría un árbol que no es el commiteado.
+- El probe del spike se compila con `--locked`. El spike está excluido del workspace y tiene su propio lockfile, así que `cargo build --workspace` nunca lo construye: sin `--locked`, cargo puede re-resolver sus dependencias en silencio y el pipeline probaría un árbol que no es el commiteado. **Ojo con lo que el spike NO es**: no tiene tests unitarios —su `lib.rs` es una línea—; sus aserciones son las del script de smoke, que es donde debe estar.
+- El job de Flutter falla si queda un `test.only`. Dart no tiene `forbidOnly`: un test enfocado hace que la suite corra **un** test y salga con 0, y el pipeline queda verde mientras el resto nunca corrió.
+- El check del cache de sqlx pone `SQLX_OFFLINE=false` explícito, para que no se vuelva un no-op si algún día se activa el modo offline en el pipeline.
+- Se podaron **8 archivos stale** del cache de sqlx: quedaban de queries que ya no existen, y la expansión nunca poda. Ahora el cache tiene exactamente las 7 queries vivas.
+
+**Queda abierto como trabajo posterior:** anclar las actions de terceros a su SHA en vez de a su etiqueta mayor, y verificar el instalador del motor con un checksum. El instalador se baja de una URL mutable y se ejecuta en cada push: hoy es el único punto del pipeline que ejecuta código de un tercero sin fijar.
 
 ---
 
