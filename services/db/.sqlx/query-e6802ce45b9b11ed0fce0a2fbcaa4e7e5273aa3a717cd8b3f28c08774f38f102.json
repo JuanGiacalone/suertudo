@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT apply_reservation_counters($1)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "apply_reservation_counters",
+        "type_info": "Uuid",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "e6802ce45b9b11ed0fce0a2fbcaa4e7e5273aa3a717cd8b3f28c08774f38f102"
+}

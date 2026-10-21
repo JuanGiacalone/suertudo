@@ -1,0 +1,44 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            count(*) FILTER (WHERE status = 'reserved')    AS active_tickets,\n            count(*) FILTER (WHERE status = 'winner')      AS winning_tickets,\n            count(DISTINCT user_id)                        AS unique_participants,\n            (SELECT count(*) FROM ticket_numbers tn WHERE tn.raffle_id = $1) AS numbers_reserved\n        FROM tickets\n        WHERE raffle_id = $1 AND status <> 'cancelled'\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "active_tickets",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "winning_tickets",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 2,
+        "name": "unique_participants",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "numbers_reserved",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "514d2eee3ca3626983416fb2deda733a7ff4eecb83dfb8af8b10eec6314f8b54"
+}

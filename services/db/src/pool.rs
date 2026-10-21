@@ -67,6 +67,15 @@ pub async fn connect(database_url: &str, max_connections: u32) -> Result<PgPool,
         .map_err(DbError::Connect)
 }
 
+/// The value of the tenant GUC that means "the platform itself".
+///
+/// It has to be a value that cannot be confused with anything else. The
+/// empty string cannot be used: a `SET LOCAL` inside a transaction leaves an
+/// **empty placeholder** at the session level, so a connection that once ran
+/// a transaction would report the system context forever after, and every
+/// statement outside a transaction would bypass the policies.
+pub const SYSTEM_CONTEXT: &str = "system";
+
 /// Runs a closure inside a transaction that carries the tenant context.
 ///
 /// The `SET LOCAL` calls are what make the RLS policies match. Without them
@@ -82,18 +91,27 @@ where
 {
     let mut tx = pool.begin().await?;
 
-    if let Some(business_id) = ctx.business_id {
-        sqlx::query("SELECT set_config('app.business_id', $1, true)")
-            .bind(business_id.to_string())
-            .execute(&mut *tx)
-            .await?;
-    }
-    if let Some(user_id) = ctx.user_id {
-        sqlx::query("SELECT set_config('app.user_id', $1, true)")
-            .bind(user_id.to_string())
-            .execute(&mut *tx)
-            .await?;
-    }
+    // The two GUC are always set. The system context gets an explicit
+    // marker, never the empty string: see `SYSTEM_CONTEXT`.
+    //
+    // A transaction that never went through `with_tenant` leaves them
+    // unset, and that is not the system: the policies fail closed.
+    sqlx::query("SELECT set_config('app.business_id', $1, true)")
+        .bind(
+            ctx.business_id
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| SYSTEM_CONTEXT.to_string()),
+        )
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("SELECT set_config('app.user_id', $1, true)")
+        .bind(
+            ctx.user_id
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| SYSTEM_CONTEXT.to_string()),
+        )
+        .execute(&mut *tx)
+        .await?;
 
     let out = f(&mut tx).await?;
 

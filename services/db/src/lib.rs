@@ -12,10 +12,16 @@
 //!    reads nothing: the policies fail closed.
 //! 2. **Migrations are the only way the schema changes.** Files in
 //!    `migrations/` are applied in order and never edited once merged.
+//!
+//! This crate is infrastructure: it talks to Postgres on purpose. It has no
+//! `domain/` module, and the rules of `AGENTS.md` §5.1 apply to the crates
+//! that consume it, not to this one.
 
 pub mod pool;
+pub mod repositories;
 
 pub use pool::{DbError, PgConnection, TenantContext, with_tenant};
+pub use repositories::RepositoryError;
 
 /// Migrations embedded in the binary, applied in filename order.
 ///
