@@ -31,6 +31,9 @@ subscription. This is a decision, not an omission.
 | What the endpoints are | [`docs/api-contract.md`](docs/api-contract.md) |
 | How the AI features work | [`docs/ai-spec.md`](docs/ai-spec.md) |
 | How the system is built and why | [`docs/architecture.md`](docs/architecture.md) |
+| Why the code of a device is verified by SMS | [`docs/toma-control-dispositivo-sms.md`](docs/toma-control-dispositivo-sms.md) |
+| What the missing SMS provider has to satisfy | [`docs/contrato-proveedor-sms.md`](docs/contrato-proveedor-sms.md) |
+| What the verification found and the rules it produced | [`docs/verificacion-fase0.md`](docs/verificacion-fase0.md) |
 | What to build next | [`docs/roadmap.md`](docs/roadmap.md) |
 | Why the stack was measured and not assumed | [`docs/spike-iii-health.md`](docs/spike-iii-health.md) |
 

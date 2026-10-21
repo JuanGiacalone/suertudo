@@ -712,6 +712,9 @@ Fases con criterio de salida. El detalle ejecutable está en [`roadmap.md`](./ro
 | Documento | Contenido |
 |---|---|
 | [`spike-iii-health.md`](./spike-iii-health.md) | Por qué se midió el stack de iii, cómo funciona y qué hay que recordar |
+| [`toma-control-dispositivo-sms.md`](./toma-control-dispositivo-sms.md) | El flujo de verificación por SMS cuando un token de dispositivo ya es de otra cuenta |
+| [`contrato-proveedor-sms.md`](./contrato-proveedor-sms.md) | Lo que tiene que cumplir el proveedor de SMS que falta |
+| [`verificacion-fase0.md`](./verificacion-fase0.md) | El registro de las rondas de verificación y las reglas que nacieron de ellas |
 | [`data-model.md`](./data-model.md) | Esquema relacional, índices, máquina de estados, migraciones |
 | [`api-contract.md`](./api-contract.md) | Endpoints HTTP, funciones iii, payloads, errores, idempotencia |
 | [`ai-spec.md`](./ai-spec.md) | Prompt, JSON Schema, guardarraíles, evals, costo |
