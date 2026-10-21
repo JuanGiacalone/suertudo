@@ -76,19 +76,19 @@ Salieron de la corrección de la ronda 1: al atar las políticas, aparecieron ca
 
 | # | Hallazgo | Corrección |
 |---|---|---|
-| F‑1 | Dos rechazos sin `ERRCODE` → SQLSTATE `P0001` → `500` en vez de `403` | Todos los rechazos llevan un SQLSTATE mapeado, y un test recorre `pg_proc` para que la clase no vuelva. |
-| F‑2 | Un participante podía escribir `status`, `deleted_at`, `email` y `password_hash` de su propia fila: **se levantaba la moderación y resucitaba una cuenta borrada** | Columnas de plataforma congeladas, con la excepción de la baja. |
-| F‑3 | `register_push_device` re-apuntaba el token de dispositivo de otro participante. **Alcanzable**: el endpoint toma el token del cuerpo. | El conflicto sólo actualiza si la fila ya es del mismo participante. |
-| F‑4 | `bind_magic_link_user` ataba un enlace consumido a un usuario arbitrario | Ata al que llama y comprueba que el correo del enlace es el de la cuenta. |
-| F‑5 | El test de catálogo tenía puntos ciegos: se saltaba dos políticas enteras y no cubría `ticket_numbers` | Cubre las dos excepciones con su expresión exacta. |
-| F‑6 | Un tenant podía escribir los contadores de su propio sorteo | Un trigger los rechaza. |
+| F-1 | Dos rechazos sin `ERRCODE` → SQLSTATE `P0001` → `500` en vez de `403` | Todos los rechazos llevan un SQLSTATE mapeado, y un test recorre `pg_proc` para que la clase no vuelva. |
+| F-2 | Un participante podía escribir `status`, `deleted_at`, `email` y `password_hash` de su propia fila: **se levantaba la moderación y resucitaba una cuenta borrada** | Columnas de plataforma congeladas, con la excepción de la baja. |
+| F-3 | `register_push_device` re-apuntaba el token de dispositivo de otro participante. **Alcanzable**: el endpoint toma el token del cuerpo. | El conflicto sólo actualiza si la fila ya es del mismo participante. |
+| F-4 | `bind_magic_link_user` ataba un enlace consumido a un usuario arbitrario | Ata al que llama y comprueba que el correo del enlace es el de la cuenta. |
+| F-5 | El test de catálogo tenía puntos ciegos: se saltaba dos políticas enteras y no cubría `ticket_numbers` | Cubre las dos excepciones con su expresión exacta. |
+| F-6 | Un tenant podía escribir los contadores de su propio sorteo | Un trigger los rechaza. |
 
 ### Ronda 4 — 0 blockers, 2 hallazgos
 
 | # | Hallazgo | Estado |
 |---|---|---|
-| N‑1 | El trigger de los contadores prometía el contexto de sistema en su comentario y no lo implementaba | **Corregido** (migración `0041`), con un test verificado que falla sin el fix. |
-| N‑2 | El conflicto del token de dispositivo responde `403 RBAC_FORBIDDEN` ("tu rol no alcanza") cuando la verdad es "ese teléfono es de otro". El escenario real: el mismo teléfono con una segunda cuenta, y **el push se pierde en silencio**. | **Decisión de producto pendiente** → `TSK-F0-10`, con los dos caminos posibles escritos. |
+| N-1 | El trigger de los contadores prometía el contexto de sistema en su comentario y no lo implementaba | **Corregido** (migración `0041`), con un test verificado que falla sin el fix. |
+| N-2 | El conflicto del token de dispositivo responde `403 RBAC_FORBIDDEN` ("tu rol no alcanza") cuando la verdad es "ese teléfono es de otro". El escenario real: el mismo teléfono con una segunda cuenta, y **el push se pierde en silencio**. | **Decisión de producto pendiente** → `TSK-F0-10`, con los dos caminos posibles escritos. |
 
 ---
 
