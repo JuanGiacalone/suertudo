@@ -29,7 +29,9 @@ set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SPIKE_DIR="$REPO_ROOT/spikes/iii-health"
-cd "$SPIKE_DIR"
+# Without the `|| exit`, a failed `cd` leaves the script running in the wrong
+# directory, where every relative path of the script points somewhere else.
+cd "$SPIKE_DIR" || exit 1
 
 # cargo is not on PATH in a bare shell (rustup installs to ~/.cargo/bin).
 [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
