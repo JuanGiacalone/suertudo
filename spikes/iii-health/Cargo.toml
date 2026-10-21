@@ -8,9 +8,6 @@ publish = false
 iii-sdk = "=0.24.6"
 serde_json = "1"
 
-hmac = "0.12"
-sha2 = "0.10"
-
 [lib]
 name = "iii_health_spike"
 path = "src/lib.rs"

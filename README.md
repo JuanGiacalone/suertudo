@@ -34,7 +34,7 @@ docker compose -f infra/docker-compose.yml up -d
 createdb suertudo && createdb suertudo_test
 
 # El smoke test del backend: levanta el stack completo sin KVM
-unshare -rm ./spikes/iii-health/verify.sh
+unshare -rm ./scripts/smoke.sh
 ```
 
 ## Estructura

@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
-# Reproducible end-to-end check of the iii stack for Suertudo.
+# The smoke test of the Suertudo backend.
 #
-# Proves, on a host WITHOUT KVM, that:
+# This is the pipeline of the CI (`TSK-F0-05`). It is NOT a spike: it is the
+# check that the backend comes up, on a host WITHOUT KVM, with the routes
+# really answering.
+#
+# It proves, on a host WITHOUT KVM, that:
 #   1. the iii engine starts and listens on 49134
 #   2. the registry `http` worker runs as a host process (no microVM)
 #   3. a Rust worker registers a function and an http trigger
@@ -13,12 +17,18 @@
 #   9. a failing consumer retries 3 times, then dead-letters
 #  10. the DLQ can be listed, redriven and discarded
 #  11. a cron trigger actually fires
+#  12. the golden test of the derivation holds
 #
-# Usage:  ./spikes/iii-health/verify.sh
-#         unshare -rm ./spikes/iii-health/verify.sh   (forces the no-KVM path)
+# The probe worker and the engine configuration live in
+# `spikes/iii-health/`, which is where the experiment that answered the
+# original question lives. This script drives them.
+#
+# Usage:  ./scripts/smoke.sh
+#         unshare -rm ./scripts/smoke.sh   (forces the no-KVM path)
 set -uo pipefail
 
-SPIKE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SPIKE_DIR="$REPO_ROOT/spikes/iii-health"
 cd "$SPIKE_DIR"
 
 # cargo is not on PATH in a bare shell (rustup installs to ~/.cargo/bin).
@@ -42,9 +52,17 @@ pass() { echo "    OK: $1"; }
 fail() { echo "    FALLO: $1"; exit 1; }
 
 # Read a counter out of the worker's queue::stats function.
+#
+# An empty result is NOT a zero: it means the worker did not answer, and a
+# zero would turn a broken stack into a passing check.
 stat_of() {
-  iii trigger -n "$NAMESPACE" queue::stats 2>/dev/null \
-    | grep -oE "\"$1\": [0-9]+" | grep -oE '[0-9]+$'
+  local value
+  value=$(iii trigger -n "$NAMESPACE" queue::stats 2>/dev/null \
+    | grep -oE "\"$1\": [0-9]+" | grep -oE '[0-9]+$')
+  if [ -z "${value:-}" ]; then
+    fail "queue::stats no devolvio el contador '$1': el worker no responde"
+  fi
+  echo "$value"
 }
 
 # Registry workers live under the iii package cache and are identified by
@@ -154,7 +172,8 @@ for i in $(seq 1 40); do
   sleep 1
   state=$(iii trigger -n "$NAMESPACE" compose::status file=./worker-compose.yaml 2>/dev/null \
           | grep -o '"state": "[a-z]*"' | head -1 | cut -d'"' -f4)
-  [ "$state" = "ready" ] && break
+  # Un estado vacio no es un estado: el comando no respondio.
+  [ -n "${state:-}" ] && [ "$state" = "ready" ] && break
   [ "$i" = 40 ] && fail "el worker http quedó en estado '$state' (ver compose.log)"
 done
 pass "worker http ready (0.22.7)"
@@ -167,7 +186,9 @@ for i in $(seq 1 60); do
   sleep 1
   ready=$(iii trigger -n "$NAMESPACE" compose::status file=./worker-compose.yaml 2>/dev/null \
           | grep -c '"state": "ready"')
-  [ "$ready" -ge 3 ] && break
+  # Un conteo de cero significa que el comando no devolvio nada: no es lo
+  # mismo que "ningun worker esta listo".
+  [ "${ready:-0}" -ge 3 ] && break
   [ "$i" = 60 ] && fail "los workers queue/cron no alcanzaron estado ready (ver compose.log)"
 done
 pass "workers queue y cron ready"
@@ -182,13 +203,15 @@ echo
 echo "### 5. GET /v1/health"
 code=$(curl -s -o /tmp/iii-health-body.json -w '%{http_code}' "$HEALTH_URL")
 [ "$code" = "200" ] || fail "se esperaba HTTP 200, se obtuvo $code"
+[ -s /tmp/iii-health-body.json ] || fail "el health respondio 200 con el cuerpo vacio"
 pass "HTTP 200 -> $(cat /tmp/iii-health-body.json)"
 
 echo
 echo "### 6. Invocación directa por el engine"
-iii trigger -n "$NAMESPACE" health::check 2>&1 | grep -q '"status": "ok"' \
+DIRECT=$(iii trigger -n "$NAMESPACE" health::check 2>&1)
+echo "$DIRECT" | grep -q '"status": "ok"' \
   && pass "health::check responde por el engine" \
-  || fail "health::check no respondió"
+  || { echo "$DIRECT" | head -10; fail "health::check no respondió"; }
 
 echo
 echo "### 7. Confirmar que no se usó ninguna microVM"
@@ -293,14 +316,26 @@ ticks_after=$(stat_of cron_ticks)
   || fail "el trigger cron no disparó ($ticks_before -> $ticks_after)"
 
 echo
-echo "### 13. Golden test de la derivación"
-TEST_OUT=$(cargo test 2>&1)
+echo "### 13. Golden test de la derivación (services/draws)"
+TEST_OUT=$(cd "$REPO_ROOT" && cargo test -p suertudo-draws 2>&1)
 if echo "$TEST_OUT" | grep -q 'test result: FAILED'; then
   echo "$TEST_OUT" | tail -25
   fail "los tests de derivación fallaron"
 fi
-PASSED=$(echo "$TEST_OUT" | grep -oE '[0-9]+ passed' | head -1)
-pass "tests de derivación verdes (${PASSED:-?})"
+# A check that passes on an empty output is not a check. This one used to
+# report PASS when cargo had refused to run at all, because the failure was
+# not the word "FAILED". The count has to be there, and it has to be a
+# number.
+PASSED=$(echo "$TEST_OUT" | grep -oE '[0-9]+ passed' | head -1 | grep -oE '^[0-9]+')
+if [ -z "${PASSED:-}" ]; then
+  echo "$TEST_OUT" | tail -25
+  fail "los tests de derivación no llegaron a correr"
+fi
+if [ "$PASSED" -lt 8 ]; then
+  echo "$TEST_OUT" | tail -25
+  fail "los tests de derivación corrieron $PASSED de 8"
+fi
+pass "tests de derivación verdes ($PASSED)"
 
 echo
 echo "### RESULTADO: PASS"

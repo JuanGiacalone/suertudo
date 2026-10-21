@@ -51,15 +51,24 @@ suertudo/
 ├── services/            Rust crates, one per iii worker
 │   ├── api/             HTTP surface: health, public endpoints, middleware
 │   ├── db/              pool, migrations, tenant context
+│   ├── draws/           the draw: the commit-reveal derivation
 │   └── identity/        registration, sessions, authorization
 ├── infra/
 │   ├── iii/             engine config, worker-compose, VERSION
 │   └── docker-compose.yml
 ├── packages/            shared generated clients (OpenAPI -> Dart, TS)
-├── spikes/              throwaway experiments that answered a question
+├── scripts/
+│   ├── dev.sh           bring the local stack up and down
+│   └── smoke.sh         the smoke test of the backend, and the core of the CI
+├── spikes/              experiments that answered a question
 ├── docs/                the documents listed above
-└── scripts/             dev helpers
+└── AGENTS.md
 ```
+
+**`spikes/` is disposable by design. `services/` and `scripts/` are not.**
+When an experiment produces something the product depends on, it is promoted
+out of the spike: the commit–reveal derivation became `services/draws/`, and
+the verification script became `scripts/smoke.sh`.
 
 ---
 
@@ -103,7 +112,7 @@ npx tsc --noEmit
 ### The whole stack, without KVM
 
 ```bash
-unshare -rm ./spikes/iii-health/verify.sh
+unshare -rm ./scripts/smoke.sh
 ```
 
 That is the smoke test of the backend. It starts the engine, the registry
@@ -317,6 +326,8 @@ These are not folklore. Each one was hit and fixed.
 | A `SECURITY DEFINER` function that increments a counter | It drifts from the truth and it is not idempotent | Recompute the counter from the truth |
 | A `RAISE EXCEPTION` without `ERRCODE` | The refusal becomes `P0001` and nobody translates it: the client gets a `500` | Every refusal carries a mapped SQLSTATE, and a test scans `pg_proc` for the ones that do not |
 | A participant can write the platform columns of its own row | It can clear its own moderation or resurrect a deleted account | Freeze them in a trigger, with the exception the product grants |
+| A check that only looks for the absence of an error | It cannot tell "everything is fine" from "nothing ran", and it reports PASS | Every check demands the mark of success: a number, a code, a body |
+| A crate inside the workspace directory that is not a member | `cargo` refuses to build it from its own directory | Add it to `members` or to `exclude`; a spike with its own lockfile belongs in `exclude` |
 
 ---
 

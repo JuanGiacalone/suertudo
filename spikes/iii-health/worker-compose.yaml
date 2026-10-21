@@ -9,7 +9,7 @@ containers:
   # added by compose::add
   queue:
     worker: package://api.workers.iii.dev/queue
-    version: "0.21.22"
+    version: "0.21.23"
   # added by compose::add
   cron:
     worker: package://api.workers.iii.dev/cron

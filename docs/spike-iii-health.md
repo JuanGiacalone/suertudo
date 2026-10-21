@@ -2,7 +2,7 @@
 
 > **Para quien retome este repo, humano o agente:** este documento explica el *porqué* de `spikes/iii-health/`. Sin él, el spike parece código muerto y el próximo que lo encuentre lo borra sin saber que detrás hay dos riesgos medidos y una versión fijada.
 >
-> Estado: **PASS**. Commiteado en `feat/spike-iii-health`. Documentos relacionados: [`PRD.md`](./PRD.md) · [`architecture.md`](./architecture.md) · [`roadmap.md`](./roadmap.md) · [`data-model.md`](./data-model.md)
+> Estado: **PASS**. Commiteado en `feat/fase0-cimientos`. Documentos relacionados: [`PRD.md`](./PRD.md) · [`architecture.md`](./architecture.md) · [`roadmap.md`](./roadmap.md) · [`data-model.md`](./data-model.md)
 
 ---
 
@@ -415,10 +415,10 @@ Honestidad sobre los límites. La lista es corta a propósito.
 
 ```bash
 # Stack completo en esta máquina
-./spikes/iii-health/verify.sh
+./scripts/smoke.sh
 
 # Forzar la ruta sin KVM (lo que hace el CI)
-unshare -rm ./spikes/iii-health/verify.sh
+unshare -rm ./scripts/smoke.sh
 ```
 
 Salida esperada:

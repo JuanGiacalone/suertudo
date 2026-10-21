@@ -1,6 +1,11 @@
 [workspace]
 resolver = "3"
-members = ["services/api", "services/db", "services/identity"]
+members = ["services/api", "services/db", "services/draws", "services/identity"]
+# The spike is an independent experiment with its own lockfile and its own
+# pin of iii-sdk. It must not inherit the versions of the workspace, and it
+# must not be a member: cargo would then refuse to build it from its own
+# directory.
+exclude = ["spikes/iii-health"]
 
 [workspace.package]
 version = "0.1.0"

@@ -453,7 +453,7 @@ LLM (probabilístico) → JSON Schema → anclas → contraste → copy → vers
 
 **Contexto:** el worker `queue` de iii ofrece tres transportes: `builtin` (in-process, file-backed, default), `redis` (pub/sub, sin DLQ ni reintentos) y `rabbitmq` (completo, con broker externo). La decisión importa porque de ella depende si el equipo puede **operar** los mensajes que fallaron.
 
-**Medición.** Los dos transportes se verificaron con el mismo script (`QUEUE_ADAPTER=builtin|rabbitmq unshare -rm ./spikes/iii-health/verify.sh`):
+**Medición.** Los dos transportes se verificaron con el mismo script (`QUEUE_ADAPTER=builtin|rabbitmq unshare -rm ./scripts/smoke.sh`):
 
 | Operación | `builtin` | `rabbitmq` |
 |---|---|---|

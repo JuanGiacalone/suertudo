@@ -1,14 +1,31 @@
-# Spike: iii health
+# Spike: iii stack
 
-Purpose: prove — before writing the monorepo — that the iii stack for Suertudo
-works on a host **without KVM**, that the commit–reveal derivation formula
-is reproducible by a third party, and that the queue and cron path works.
-
-This is the answer to the risks that could have sunk Fase 0: `R1` (SDK in
-release candidate), `R2` (workers need `/dev/kvm`) and the queue path that
-`draws::execute_draw` and `notifications::dispatch` depend on.
+**What this is:** the experiment that answered the question *does the iii
+stack work for Suertudo, and on what does it depend?* It is the answer to the
+risks that could have sunk Fase 0: `R1` (the SDK in release candidate), `R2`
+(workers that need `/dev/kvm`) and the queue path that `draws::execute_draw`
+and `notifications::dispatch` depend on.
 
 **Status: PASS.** All three are resolved. See [Findings](#findings).
+
+## What lives here and what does not
+
+This folder is a **spike**: it is allowed to be disposable. But two of its
+artifacts turned out to be product, and they were promoted out:
+
+| Was here | Is now | Why |
+|---|---|---|
+| `src/derivation.rs` | [`services/draws/src/derivation.rs`](../../services/draws/src/derivation.rs) | The commit–reveal formula is the **trust promise** of the product. Its golden test has to live with the code that runs it, not in a folder named "spikes" that the next person cleans up. |
+| `verify.sh` | [`scripts/smoke.sh`](../../scripts/smoke.sh) | It is the pipeline of the CI (`TSK-F0-05`), not an experiment. |
+
+**What stays is the experiment:** the probe worker (`src/main.rs`,
+`src/queue_probe.rs`) and the engine configuration that drives it. The probe
+worker exists to exercise the engine; it is not product code and it is not
+supposed to grow.
+
+This crate is **excluded from the Rust workspace** on purpose: it has its own
+`Cargo.lock` and its own pin of `iii-sdk`, and it must not inherit the
+versions of the project.
 
 > **Por qué existe este spike, cómo funciona mecánicamente y qué hay que
 > recordar para futuros cambios:** [`docs/spike-iii-health.md`](../../docs/spike-iii-health.md).
@@ -20,13 +37,13 @@ release candidate), `R2` (workers need `/dev/kvm`) and the queue path that
 
 ```bash
 # Full stack, on this machine
-./spikes/iii-health/verify.sh
+./scripts/smoke.sh
 
 # Force the no-KVM path: mask /dev/kvm in a private mount namespace
-unshare -rm ./spikes/iii-health/verify.sh
+unshare -rm ./scripts/smoke.sh
 
 # Test the rabbitmq transport instead (needs a broker on 127.0.0.1:5672)
-QUEUE_ADAPTER=rabbitmq unshare -rm ./spikes/iii-health/verify.sh
+QUEUE_ADAPTER=rabbitmq unshare -rm ./scripts/smoke.sh
 ```
 
 The script is idempotent: it cleans up every process it starts, so it can run

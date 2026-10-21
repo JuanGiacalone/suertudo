@@ -1,0 +1,18 @@
+[package]
+name = "suertudo-draws"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The derivation is pure: no iii, no database, no clock, no randomness.
+# That is what makes it verifiable by a third party.
+hmac = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+serde = { workspace = true }

@@ -228,7 +228,7 @@ Lo que **no** hay que hacer es volver a permitir que cualquiera re-apunte el tok
 
 **Contexto:** el spike `spikes/iii-health` verificó el engine, los triggers `http` y el registro de funciones, pero **no** la ruta de colas. El engine registra un warning explícito: `trigger type durable:subscriber is not registered ... If this persists, the queue worker is missing`. `draws::execute_draw` y `notifications::dispatch` dependen de esa ruta, así que hay que probarla antes de construir encima.
 
-**Archivos:** `spikes/iii-health/verify.sh` (extender), `spikes/iii-health/src/queue_probe.rs` (nuevo), `docs/api-contract.md` §7.3
+**Archivos:** `scripts/smoke.sh` (extender), `spikes/iii-health/src/queue_probe.rs` (nuevo), `docs/api-contract.md` §7.3
 
 **Criterios de aceptación:**
 - [x] El worker `queue` del registro alcanza estado `ready` y provee `durable:subscriber` y `engine::queue::*`.
@@ -242,7 +242,7 @@ Lo que **no** hay que hacer es volver a permitir que cualquiera re-apunte el tok
 - [x] `verify.sh` queda como el smoke test del CI, con teardown por nombre de proceso exacto.
 - [x] El adaptador `rabbitmq` se verificó contra un broker real y dio lugar a `ADR-013`.
 
-**Verificación:** `unshare -rm ./spikes/iii-health/verify.sh` → `RESULTADO: PASS` (13 secciones)
+**Verificación:** `unshare -rm ./scripts/smoke.sh` → `RESULTADO: PASS` (13 secciones)
 
 **Hallazgos que cambiaron los docs:**
 - **El engine no incluye ningún tipo de trigger de cola ni de cron.** Cada uno necesita su worker del registro: `http`, `queue` y `cron`. Sin ellos, el trigger queda `PENDING` para siempre.
