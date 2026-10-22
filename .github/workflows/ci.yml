@@ -193,7 +193,10 @@ jobs:
           # code, still fails the step, and that is deliberate: a false
           # positive costs a red pipeline for a minute, and a false
           # negative is a suite that silently does not run.
-          focused="$(printf '%s\n' "$scan" | grep -vE '^[^:]+:[0-9]+:[[:space:]]*//')"
+          # `|| true` on purpose: with only exempt comments, the filter
+          # selects nothing and grep exits 1, and `bash -e` would kill the
+          # step BEFORE the verdict below is evaluated.
+          focused="$(printf '%s\n' "$scan" | grep -vE '^[^:]+:[0-9]+:[[:space:]]*//' || true)"
           if [ -n "$focused" ]; then
             echo "::error::a focused test would make this pipeline run one test and pass"
             echo "$focused"

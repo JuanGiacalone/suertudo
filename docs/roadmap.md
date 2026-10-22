@@ -270,6 +270,10 @@ README.md
 - `unshare -rm ./scripts/smoke.sh`: **PASS**, todas las secciones en verde.
 - Los checks nuevos del pipeline, probados en sus ramas: el guard de tests enfocados ignora un comentario, detecta un `test.only` real, y distingue un escaneo roto (estado 2) de un repositorio limpio; el chequeo de la versión del motor acepta la versión igual y con prefijo `v`, y separa "el motor no respondió" de "la versión es otra".
 
+**La trampa de `bash -e`, y por qué este párrafo existe.** La primera versión del guard fallaba en el caso que el propio guard dice eximir: el filtro no selecciona ninguna línea, `grep` sale con 1, y como el shell del CI corre con `bash -e`, **el paso moría antes de llegar al veredicto**. Un `set -e` convierte un resultado vacío en un paso rojo, y un resultado vacío es exactamente lo que significa "no hay tests enfocados".
+
+El `|| true` del filtro está ahí por eso, y no es un atajo: el escaneo **anterior** ya comprobó su propio estado de salida, así que el `|| true` no tapa ningún fallo real del escaneo. Un `set -e` convierte un resultado vacío en un paso rojo, y un resultado vacío es exactamente lo que significa "no hay tests enfocados".
+
 **Revisión independiente:** el pipeline pasó por la revisión nativa de Gentle AI, con riesgo alto y tres lentes —riesgo, legibilidad y fiabilidad—. Salió **aprobada**. Un hallazgo crítico fue **refutado**: decía que el job de Rust no exporta la base y que los macros de sqlx no expandían sin ella, y es falso —el build cae al cache commiteado sin `DATABASE_URL`, y está verificado—. Los veinticuatro hallazgos restantes son advertencias informativas.
 
 **Lo que se corrigió después de la revisión:**
