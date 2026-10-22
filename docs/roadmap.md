@@ -268,7 +268,7 @@ README.md
 - Flutter: `analyze` sin hallazgos, `format` sin cambios, 1 test verde.
 - Next.js: `lint` limpio, `tsc --noEmit` sin errores, `build` OK.
 - `unshare -rm ./scripts/smoke.sh`: **PASS**, todas las secciones en verde.
-- Los checks nuevos del pipeline: el guard de tests enfocados **tiene test** (`scripts/check-focused-tests_test.sh`), que fija cada rama —un directorio limpio, un test enfocado, un comentario que menciona la regla, un llamador con `bash -e`, un test enfocado en un subdirectorio, la anotación `::error::`, el contenido del repositorio lejos del stdout, un escaneo roto y un directorio inexistente—. El RED se observó: quitar el `|| true`, cambiar el `-gt 1`, dejar de eximir los comentarios o dejar de distinguir el escaneo roto, hacen fallar el test.
+- Los checks nuevos del pipeline: el guard de tests enfocados **tiene test** (`scripts/check-focused-tests_test.sh`), que fija cada rama —un directorio limpio, un test enfocado, un comentario que menciona la regla, un llamador con `bash -e`, un test enfocado en un subdirectorio, la anotación `::error::`, el contenido del repositorio lejos del stdout, las variantes `testWidgets.only` y `group.only`, un archivo que no es de test, un escaneo roto y un directorio inexistente—. El RED se observó: quitar el `|| true`, cambiar el `-gt 1`, dejar de eximir los comentarios o dejar de distinguir el escaneo roto, hacen fallar el test.
 - El guard cubre **todo el repositorio**, no sólo `apps/mobile`: un test enfocado en un paquete que no es la app móvil sigue siendo un test enfocado. El escaneo salta los directorios de las dependencias y de las builds, que no son nuestros y son enormes.
 - El fallo del guard **anota el error** (`::error::`) para GitHub Actions, con una frase **fija**. El contenido del repositorio va al stderr, que GitHub Actions no lee como comando: un archivo del repo no puede inyectar un comando de workflow en el log.
 - El chequeo de la versión del motor acepta la versión igual y con prefijo `v`, y separa "el motor no respondió" de "la versión es otra".
@@ -312,7 +312,9 @@ SQLX_OFFLINE_DIR=$PWD/services/db/.sqlx DATABASE_URL=<la de la base> cargo build
 
 # 4. `comm -23` muestra SOLO lo que sobró: los archivos del cache viejo que
 #    no están en el nuevo son de queries que ya no existen. Se borran a mano.
-comm -23 <(ls "$old/cache") <(ls services/db/.sqlx)
+#    `comm` exige las dos entradas ORDENADAS, y `ls` ordena según el locale:
+#    con `LC_ALL=C sort` el resultado es el mismo en cualquier máquina.
+comm -23 <(ls "$old/cache" | LC_ALL=C sort) <(ls services/db/.sqlx | LC_ALL=C sort)
 ```
 
 **El paso 2 no es opcional, y su ausencia es silenciosa.** `sqlx::migrate!` embebe las migraciones en tiempo de compilación, así que un build incremental no vuelve a expandir los macros: el comando termina en menos de un segundo, dice `Finished`, y el cache queda vacío. Es la misma trampa de `AGENTS.md` §5.3, con la diferencia de que acá no falla: **parece** que funcionó.

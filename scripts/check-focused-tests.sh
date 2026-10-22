@@ -34,7 +34,10 @@ DIR="${1:-$REPO_ROOT}"
 # never ran looks EXACTLY like a clean directory. AGENTS.md §9 says that
 # a check which only looks for the absence of an error reports PASS when
 # nothing ran.
-scan="$(grep -rn --include='*_test.dart' \
+# `-H` prints the file name even when the scan is a single file, so the
+# format of the output is always `path:line:content` and the filter below
+# does not depend on how the script was called.
+scan="$(grep -rnH --include='*_test.dart' \
   --exclude-dir=node_modules --exclude-dir=target --exclude-dir=.dart_tool \
   --exclude-dir=build --exclude-dir=.git --exclude-dir=.next \
   -E '\b(test|testWidgets|group)\.only\b' "$DIR" 2>&1)" && status=0 || status=$?
