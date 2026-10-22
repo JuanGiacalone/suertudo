@@ -792,7 +792,7 @@ Lo que cubre, en resumen:
 - **El stack levanta sin KVM.** El motor, los workers del registro (`http`, `queue`, `cron`) y un worker Rust propio. Y se comprueba que no se usó ninguna microVM.
 - **No queda nada de una corrida anterior.** Al principio del script se comprueba que no hay procesos iii vivos: es la precondición de la corrida siguiente.
 - **Las rutas responden de verdad.** Un `200` por HTTP y una invocación directa por el engine —un worker registrado puede no tener ninguna ruta, y ese fue exactamente el fallo del RC.
-- **La cola funciona de punta a punta.** Publicar y consumir, encolar por función, un consumidor que falla reintenta (el número de reintentos lo fija el script, en su sección de la DLQ) y después llega a la DLQ, y la DLQ se puede listar, reprocesar y descartar.
+- **La cola funciona de punta a punta.** Publicar y consumir, encolar por función, un consumidor que falla reintenta (el número de reintentos lo fija [`scripts/smoke.sh`](../scripts/smoke.sh), en su sección de reintentos y DLQ) y después llega a la DLQ, y la DLQ se puede listar, reprocesar y descartar.
 - **El cron dispara.** Y la derivación conserva su valor dorado.
 
 **Verificación en CI:** este job es el que habría atrapado los dos errores que más costaron: un tipo de trigger que no queda registrado, y una versión del SDK que rompe las rutas en silencio. Los dos son silenciosos — el worker parece sano en `engine::workers::list` y la función simplemente nunca corre.

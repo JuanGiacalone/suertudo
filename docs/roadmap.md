@@ -268,7 +268,8 @@ README.md
 - Flutter: `analyze` sin hallazgos, `format` sin cambios, 1 test verde.
 - Next.js: `lint` limpio, `tsc --noEmit` sin errores, `build` OK.
 - `unshare -rm ./scripts/smoke.sh`: **PASS**, todas las secciones en verde.
-- Los checks nuevos del pipeline: el guard de tests enfocados **tiene test** (`scripts/check-focused-tests_test.sh`), que fija cada rama —un directorio limpio, un test enfocado, un comentario que menciona la regla, un llamador con `bash -e`, un test enfocado en un subdirectorio, la anotación `::error::`, el contenido del repositorio lejos del stdout, las variantes `testWidgets.only` y `group.only`, un archivo que no es de test, un escaneo roto y un directorio inexistente—. El RED se observó: quitar el `|| true`, cambiar el `-gt 1`, dejar de eximir los comentarios o dejar de distinguir el escaneo roto, hacen fallar el test.
+- Los checks nuevos del pipeline: el guard de tests enfocados **tiene test** (`scripts/check-focused-tests_test.sh`), que fija cada rama —un directorio limpio, un test enfocado, un comentario que menciona la regla, un llamador con `bash -e`, un test enfocado en un subdirectorio, la anotación `::error::`, el contenido del repositorio lejos del stdout, las variantes `testWidgets.only` y `group.only`, un archivo que no es de test, y el escaneo roto—. El RED se observó: quitar el `|| true`, cambiar el `-gt 1`, dejar de eximir los comentarios o dejar de distinguir el escaneo roto, hacen fallar el test.
+- **La rama del escaneo roto está cubierta en cualquier entorno, pero no con el mismo caso.** El caso del directorio ilegible depende de que el runner no sea root —root lee el directorio igual, y el caso se omite y lo dice—. La rama, la que importa, la cubre **siempre** el caso del directorio inexistente, que hace fallar el escaneo con el mismo código de salida. Lo que se omite bajo root es un *disparador* de esa rama, no la rama.
 - El guard cubre **todo el repositorio**, no sólo `apps/mobile`: un test enfocado en un paquete que no es la app móvil sigue siendo un test enfocado. El escaneo salta los directorios de las dependencias y de las builds, que no son nuestros y son enormes.
 - El fallo del guard **anota el error** (`::error::`) para GitHub Actions, con una frase **fija**. El contenido del repositorio va al stderr, que GitHub Actions no lee como comando: un archivo del repo no puede inyectar un comando de workflow en el log.
 - El chequeo de la versión del motor acepta la versión igual y con prefijo `v`, y separa "el motor no respondió" de "la versión es otra".
@@ -321,7 +322,10 @@ comm -23 <(ls "$old/cache" | LC_ALL=C sort) <(ls services/db/.sqlx | LC_ALL=C so
 
 Este procedimiento está verificado: regenera las 7 queries vivas y el resultado es idéntico al cache commiteado.
 
-**Queda abierto como trabajo posterior:** anclar las actions de terceros a su SHA en vez de a su etiqueta mayor, y verificar el instalador del motor con un checksum. El instalador se baja de una URL mutable y se ejecuta en cada push: hoy es el único punto del pipeline que ejecuta código de un tercero sin fijar.
+**Queda abierto como trabajo posterior:**
+- Anclar las actions de terceros a su SHA en vez de a su etiqueta mayor, y verificar el instalador del motor con un checksum. El instalador se baja de una URL mutable y se ejecuta en cada push: hoy es el único punto del pipeline que ejecuta código de un tercero sin fijar.
+- Un caso del test del guard que invoque el script con un **archivo suelto** en vez de un directorio. El `-H` del escaneo existe para que el formato de la salida sea el mismo en los dos casos, y ese contrato todavía no lo fija ningún test.
+- Que el caso omitido bajo root deje una marca que el resumen del test consuma, y no sólo una línea que se lee a ojo.
 
 ---
 
