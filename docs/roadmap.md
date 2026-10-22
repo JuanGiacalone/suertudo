@@ -268,11 +268,14 @@ README.md
 - Flutter: `analyze` sin hallazgos, `format` sin cambios, 1 test verde.
 - Next.js: `lint` limpio, `tsc --noEmit` sin errores, `build` OK.
 - `unshare -rm ./scripts/smoke.sh`: **PASS**, todas las secciones en verde.
-- Los checks nuevos del pipeline, probados en sus ramas: el guard de tests enfocados ignora un comentario, detecta un `test.only` real, y distingue un escaneo roto (estado 2) de un repositorio limpio; el chequeo de la versión del motor acepta la versión igual y con prefijo `v`, y separa "el motor no respondió" de "la versión es otra".
+- Los checks nuevos del pipeline: el guard de tests enfocados **tiene test** (`scripts/check-focused-tests_test.sh`), que fija sus seis ramas —un directorio limpio, un test enfocado, un comentario que menciona la regla, un llamador con `bash -e`, un escaneo roto y un directorio inexistente—. El RED se observó: quitar el `|| true`, cambiar el `-gt 1`, dejar de eximir los comentarios o dejar de distinguir el escaneo roto, hacen fallar el test.
+- El chequeo de la versión del motor acepta la versión igual y con prefijo `v`, y separa "el motor no respondió" de "la versión es otra".
 
-**La trampa de `bash -e`, y por qué este párrafo existe.** La primera versión del guard fallaba en el caso que el propio guard dice eximir: el filtro no selecciona ninguna línea, `grep` sale con 1, y como el shell del CI corre con `bash -e`, **el paso moría antes de llegar al veredicto**. Un `set -e` convierte un resultado vacío en un paso rojo, y un resultado vacío es exactamente lo que significa "no hay tests enfocados".
+**La trampa de `bash -e`, y por qué el guard tiene test.** La primera versión del guard fallaba en el caso que el propio guard dice eximir: el filtro no selecciona ninguna línea, `grep` sale con 1, y como el shell del CI corre con `bash -e`, **el paso moría antes de llegar al veredicto**. Un `set -e` convierte un resultado vacío en un paso rojo, y un resultado vacío es exactamente lo que significa "no hay tests enfocados".
 
-El `|| true` del filtro está ahí por eso, y no es un atajo: el escaneo **anterior** ya comprobó su propio estado de salida, así que el `|| true` no tapa ningún fallo real del escaneo. Un `set -e` convierte un resultado vacío en un paso rojo, y un resultado vacío es exactamente lo que significa "no hay tests enfocados".
+El `|| true` del filtro está ahí por eso, y no es un atajo: el escaneo **anterior** ya comprobó su propio estado de salida, así que el `|| true` no tapa ningún fallo real del escaneo.
+
+Y hay una segunda trampa, que el test también fijó: **el veredicto no es el estado de salida del filtro**. Un escaneo vacío produce igual una línea en blanco, que el filtro deja pasar, así que `grep` sale con 0 y el estado de salida diría "hay un test enfocado" cuando no hay ninguno. Lo que decide es el contenido: la sustitución de comandos se come el salto de línea final, y lo que queda es la cadena vacía.
 
 **Revisión independiente:** el pipeline pasó por la revisión nativa de Gentle AI, con riesgo alto y tres lentes —riesgo, legibilidad y fiabilidad—. Salió **aprobada**. Un hallazgo crítico fue **refutado**: decía que el job de Rust no exporta la base y que los macros de sqlx no expandían sin ella, y es falso —el build cae al cache commiteado sin `DATABASE_URL`, y está verificado—. Los veinticuatro hallazgos restantes son advertencias informativas.
 
@@ -290,7 +293,11 @@ El procedimiento correcto **reconstruye el cache desde cero**, y por eso el cach
 
 ```bash
 # 1. El cache se aparta. La expansión escribe lo que vive, y sólo lo que vive.
-mv services/db/.sqlx /tmp/sqlx-old && mkdir -p services/db/.sqlx
+#    El destino tiene que ser NUEVO: con un destino fijo, la segunda corrida
+#    anida el cache dentro del directorio que ya existe y la comparación del
+#    paso 4 lista las cosas equivocadas.
+old="$(mktemp -d)"
+mv services/db/.sqlx "$old/cache" && mkdir -p services/db/.sqlx
 
 # 2. La recompilación se fuerza. Sin esto, cargo ve el crate ya compilado,
 #    no vuelve a expandir los macros, y el paso 3 no regenera NADA: el
@@ -301,9 +308,9 @@ touch services/db/src/lib.rs
 #    Con el cache vacío no hay nada que leer: la expansión tiene que ir a la base.
 SQLX_OFFLINE_DIR=$PWD/services/db/.sqlx DATABASE_URL=<la de la base> cargo build -p suertudo-db
 
-# 4. Los archivos que quedaron en /tmp/sqlx-old y no en el nuevo son de queries
-#    que ya no existen. Se comparan y se borran a mano.
-diff <(ls /tmp/sqlx-old) <(ls services/db/.sqlx)
+# 4. `comm -23` muestra SOLO lo que sobró: los archivos del cache viejo que
+#    no están en el nuevo son de queries que ya no existen. Se borran a mano.
+comm -23 <(ls "$old/cache") <(ls services/db/.sqlx)
 ```
 
 **El paso 2 no es opcional, y su ausencia es silenciosa.** `sqlx::migrate!` embebe las migraciones en tiempo de compilación, así que un build incremental no vuelve a expandir los macros: el comando termina en menos de un segundo, dice `Finished`, y el cache queda vacío. Es la misma trampa de `AGENTS.md` §5.3, con la diferencia de que acá no falla: **parece** que funcionó.

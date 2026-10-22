@@ -102,7 +102,7 @@ jobs:
             echo "::error::the installed engine is $installed and the declared one is $version"
             exit 1
           fi
-          echo "engine $installed: the declared one"
+          echo "the installed engine is $installed and the declared one is $version"
 
       - name: The stack comes up, and the routes answer
         # The engine, the registry workers, the queue, the cron and the
