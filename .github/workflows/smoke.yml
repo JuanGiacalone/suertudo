@@ -81,14 +81,28 @@ jobs:
           # The installed engine has to BE the declared one. An emptiness
           # check is not enough: a version that resolves to something else
           # installs something else, and the job would run against an engine
-          # that nobody declared. The last field is the version, which is
-          # how the installer itself reads it.
-          installed="$(iii --version | awk '{print $NF}')"
-          if [ "$installed" != "$version" ]; then
+          # that nobody declared.
+          #
+          # The last field is the version, which is how the installer
+          # itself reads it. A leading `v` is tolerated on either side:
+          # the pin is a number, and the output format of a third party
+          # tool is not something to be strict about.
+          raw="$(iii --version 2>&1)" || {
+            echo "::error::the engine did not answer --version"
+            echo "$raw"
+            exit 1
+          }
+          echo "$raw"
+          installed="$(printf '%s\n' "$raw" | awk '{print $NF}')"
+          if [ -z "$installed" ]; then
+            echo "::error::the engine did not report a version"
+            exit 1
+          fi
+          if [ "${installed#v}" != "${version#v}" ]; then
             echo "::error::the installed engine is $installed and the declared one is $version"
             exit 1
           fi
-          echo "engine $installed, the declared one"
+          echo "engine $installed: the declared one"
 
       - name: The stack comes up, and the routes answer
         # The engine, the registry workers, the queue, the cron and the

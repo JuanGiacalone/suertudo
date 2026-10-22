@@ -268,6 +268,7 @@ README.md
 - Flutter: `analyze` sin hallazgos, `format` sin cambios, 1 test verde.
 - Next.js: `lint` limpio, `tsc --noEmit` sin errores, `build` OK.
 - `unshare -rm ./scripts/smoke.sh`: **PASS**, todas las secciones en verde.
+- Los checks nuevos del pipeline, probados en sus ramas: el guard de tests enfocados ignora un comentario, detecta un `test.only` real, y distingue un escaneo roto (estado 2) de un repositorio limpio; el chequeo de la versión del motor acepta la versión igual y con prefijo `v`, y separa "el motor no respondió" de "la versión es otra".
 
 **Revisión independiente:** el pipeline pasó por la revisión nativa de Gentle AI, con riesgo alto y tres lentes —riesgo, legibilidad y fiabilidad—. Salió **aprobada**. Un hallazgo crítico fue **refutado**: decía que el job de Rust no exporta la base y que los macros de sqlx no expandían sin ella, y es falso —el build cae al cache commiteado sin `DATABASE_URL`, y está verificado—. Los veinticuatro hallazgos restantes son advertencias informativas.
 
@@ -279,11 +280,31 @@ README.md
 - El check del cache de sqlx pone `SQLX_OFFLINE=false` explícito, para que no se vuelva un no-op si algún día se activa el modo offline en el pipeline.
 - Se podaron **8 archivos stale** del cache de sqlx: quedaban de queries que ya no existen. Ahora el cache tiene exactamente las 7 queries vivas. **Verificado**: con el cache del repo apartado, el build contra la base viva regenera 7 archivos y ninguno más, y después de podar, `cargo build` **sin** `DATABASE_URL` sigue compilando —que es lo que depende del cache—.
 
-**Mantenimiento manual, a falta de `cargo sqlx prepare`:** la expansión de los macros **nunca poda**. Si se borra una query, su archivo de cache queda atrás y el pipeline no lo detecta: el check compara el cache contra el esquema vivo y sólo ve las queries **nuevas o cambiadas**. Cuando se toque una query de `services/db`, hay que regenerar el cache entero y podar lo que sobró:
+**Mantenimiento manual del cache de sqlx, a falta de `cargo sqlx prepare`:** la expansión de los macros **nunca poda**. Si se borra una query, su archivo de cache queda atrás y el pipeline no lo detecta: el check compara el cache contra el esquema vivo y sólo ve las queries **nuevas o cambiadas**.
+
+El procedimiento correcto **reconstruye el cache desde cero**, y por eso el cache queda con exactamente las queries vivas, sin sobrantes:
 
 ```bash
+# 1. El cache se aparta. La expansión escribe lo que vive, y sólo lo que vive.
+mv services/db/.sqlx /tmp/sqlx-old && mkdir -p services/db/.sqlx
+
+# 2. La recompilación se fuerza. Sin esto, cargo ve el crate ya compilado,
+#    no vuelve a expandir los macros, y el paso 3 no regenera NADA: el
+#    procedimiento aparenta funcionar y no cambia una línea.
+touch services/db/src/lib.rs
+
+# 3. Los macros se expanden contra el esquema vivo y escriben el cache nuevo.
+#    Con el cache vacío no hay nada que leer: la expansión tiene que ir a la base.
 SQLX_OFFLINE_DIR=$PWD/services/db/.sqlx DATABASE_URL=<la de la base> cargo build -p suertudo-db
+
+# 4. Los archivos que quedaron en /tmp/sqlx-old y no en el nuevo son de queries
+#    que ya no existen. Se comparan y se borran a mano.
+diff <(ls /tmp/sqlx-old) <(ls services/db/.sqlx)
 ```
+
+**El paso 2 no es opcional, y su ausencia es silenciosa.** `sqlx::migrate!` embebe las migraciones en tiempo de compilación, así que un build incremental no vuelve a expandir los macros: el comando termina en menos de un segundo, dice `Finished`, y el cache queda vacío. Es la misma trampa de `AGENTS.md` §5.3, con la diferencia de que acá no falla: **parece** que funcionó.
+
+Este procedimiento está verificado: regenera las 7 queries vivas y el resultado es idéntico al cache commiteado.
 
 **Queda abierto como trabajo posterior:** anclar las actions de terceros a su SHA en vez de a su etiqueta mayor, y verificar el instalador del motor con un checksum. El instalador se baja de una URL mutable y se ejecuta en cada push: hoy es el único punto del pipeline que ejecuta código de un tercero sin fijar.
 

@@ -785,23 +785,14 @@ unshare -rm ./scripts/smoke.sh
 
 El script es autocontenido: **compila el worker de prueba antes de arrancarlo**. El spike está excluido del workspace de Rust (tiene su propio lockfile y su propio pin del SDK), así que `cargo build --workspace` no lo construye, y un script que necesita un binario compilado a mano es un script que sólo funciona en la máquina de quien lo escribió.
 
-El script verifica, y su propio encabezado enumera, para que no haya que contarlas:
+El script verifica el stack entero, y **su propio encabezado enumera lo que verifica**, uno por uno. Esa lista vive en el script y no acá: dos listas de lo mismo se desincronizan sin que nadie lo note, y la del script es la que se puede leer junto al código que la cumple.
 
-- no queda ningún proceso iii de una corrida anterior;
-- se conoce el estado de KVM —el stack no lo necesita, pero el que corre el test tiene que saberlo—;
-- el motor escucha;
-- el transporte de cola bajo prueba es el que se pidió;
-- los workers del registro (`http`, `queue`, `cron`) alcanzan el estado `ready`;
-- el worker propio registra su función y su trigger `http`;
-- la ruta responde `200`;
-- la función se invoca por el engine;
-- no se usó ninguna microVM en ningún momento de la corrida;
-- un mensaje publicado llega a su suscriptor;
-- una cola por función acepta `TriggerAction::Enqueue`;
-- un consumidor que falla reintenta tres veces y después va a la DLQ;
-- la DLQ se puede listar, reprocesar y descartar;
-- el trigger `cron` se dispara;
-- el valor dorado de la derivación se sostiene.
+Lo que cubre, en resumen:
+
+- **El stack levanta sin KVM.** El motor, los workers del registro (`http`, `queue`, `cron`) y un worker Rust propio. Y se comprueba que no se usó ninguna microVM.
+- **Las rutas responden de verdad.** Un `200` por HTTP y una invocación directa por el engine —un worker registrado puede no tener ninguna ruta, y ese fue exactamente el fallo del RC.
+- **La cola funciona de punta a punta.** Publicar y consumir, encolar por función, reintentar, llegar a la DLQ, y redrive y discard.
+- **El cron dispara.** Y la derivación conserva su valor dorado.
 
 **Verificación en CI:** este job es el que habría atrapado los dos errores que más costaron: un tipo de trigger que no queda registrado, y una versión del SDK que rompe las rutas en silencio. Los dos son silenciosos — el worker parece sano en `engine::workers::list` y la función simplemente nunca corre.
 

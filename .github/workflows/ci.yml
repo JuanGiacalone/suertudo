@@ -173,12 +173,30 @@ jobs:
         # of the suite never ran, and nobody finds out until the bug that
         # the skipped test would have caught shows up in production.
         run: |
-          # The comment lines are filtered out: a test file that DOCUMENTS
-          # the rule would otherwise turn the pipeline red, and that is the
-          # kind of check people learn to work around.
-          if grep -rn --include='*_test.dart' -E '\b(test|testWidgets|group)\.only\b' . \
-               | grep -vE '^[^:]+:[0-9]+:[[:space:]]*//'; then
+          # The scan and the verdict are two separate things, and the exit
+          # status of the scan is checked on its own. A pipeline of two
+          # greps loses the status of the first one, and a scan that never
+          # ran looks EXACTLY like a clean repository: AGENTS.md §9 says
+          # that a check which only looks for the absence of an error
+          # reports PASS when nothing ran.
+          scan="$(grep -rn --include='*_test.dart' -E '\b(test|testWidgets|group)\.only\b' . 2>&1)" && status=0 || status=$?
+          if [ "$status" -gt 1 ]; then
+            echo "::error::the scan of the focused tests failed"
+            echo "$scan"
+            exit 1
+          fi
+
+          # The lines that START with `//` are exempt: a test file that
+          # documents the rule would otherwise turn the pipeline red, and
+          # that is the kind of check people learn to work around. A
+          # mention inside a block comment, or at the end of a line of
+          # code, still fails the step, and that is deliberate: a false
+          # positive costs a red pipeline for a minute, and a false
+          # negative is a suite that silently does not run.
+          focused="$(printf '%s\n' "$scan" | grep -vE '^[^:]+:[0-9]+:[[:space:]]*//')"
+          if [ -n "$focused" ]; then
             echo "::error::a focused test would make this pipeline run one test and pass"
+            echo "$focused"
             exit 1
           fi
 
