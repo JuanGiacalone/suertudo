@@ -11,7 +11,13 @@
 # day it was written. `scripts/check-focused-tests_test.sh` pins every
 # branch of this script.
 #
-# Usage:  scripts/check-focused-tests.sh <directory>
+# Usage:  scripts/check-focused-tests.sh [directory]
+#
+# The directory defaults to the ROOT of the repository, and that is on
+# purpose: a focused test in a Dart package that is not the mobile app is
+# still a focused test. The scan skips the directories of the
+# dependencies and of the builds, because they are not ours and they are
+# enormous.
 #
 # Exit codes:
 #   0  there is no focused test
@@ -19,7 +25,8 @@
 #   2  the scan itself failed
 set -uo pipefail
 
-DIR="${1:-apps/mobile}"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DIR="${1:-$REPO_ROOT}"
 
 # The scan and the verdict are two separate things, and the exit status
 # of the scan is checked on its own. grep exits 1 when it finds nothing
@@ -27,8 +34,17 @@ DIR="${1:-apps/mobile}"
 # never ran looks EXACTLY like a clean directory. AGENTS.md §9 says that
 # a check which only looks for the absence of an error reports PASS when
 # nothing ran.
-scan="$(grep -rn --include='*_test.dart' -E '\b(test|testWidgets|group)\.only\b' "$DIR" 2>&1)" && status=0 || status=$?
+scan="$(grep -rn --include='*_test.dart' \
+  --exclude-dir=node_modules --exclude-dir=target --exclude-dir=.dart_tool \
+  --exclude-dir=build --exclude-dir=.git --exclude-dir=.next \
+  -E '\b(test|testWidgets|group)\.only\b' "$DIR" 2>&1)" && status=0 || status=$?
 if [ "$status" -gt 1 ]; then
+  # The annotation goes to the STDOUT, where GitHub Actions reads the
+  # workflow commands, and it is a STATIC sentence. The content of the
+  # repository goes to the STDERR, where it cannot inject a command.
+  if [ -n "${GITHUB_ACTIONS:-}" ]; then
+    echo "::error::the scan of the focused tests failed"
+  fi
   echo "the scan of the focused tests failed" >&2
   echo "$scan" >&2
   exit 2
@@ -53,10 +69,14 @@ fi
 # empty string, and THAT is the verdict.
 focused="$(printf '%s\n' "$scan" | grep -vE '^[^:]+:[0-9]+:[[:space:]]*//' || true)"
 if [ -n "$focused" ]; then
+  # The annotation is a STATIC sentence on the STDOUT, where GitHub
+  # Actions reads the workflow commands. The content of the repository
+  # goes to the STDERR: GitHub Actions does not read commands from there,
+  # so a file of the repository cannot inject one into the log.
+  if [ -n "${GITHUB_ACTIONS:-}" ]; then
+    echo "::error::a focused test would make the pipeline run one test and pass"
+  fi
   echo "a focused test would make the pipeline run one test and pass" >&2
-  # To stderr, on purpose: GitHub Actions parses the workflow commands of
-  # the STDOUT, and the content of a file of the repository must not be
-  # able to inject one into the log of the pipeline.
   echo "$focused" >&2
   exit 1
 fi

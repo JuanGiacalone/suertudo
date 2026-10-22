@@ -71,6 +71,37 @@ else
   failures=$((failures + 1))
 fi
 
+# 3c. A nested directory: the scan recurses, because a focused test in a
+#     package that is not the mobile app is still a focused test.
+mkdir -p "$work/nested/deep/deeper"
+cat > "$work/nested/deep/deeper/a_test.dart" << 'DART'
+void main() {
+  group.only('un grupo', () {});
+}
+DART
+expect "un test enfocado en un subdirectorio se detecta" 1 "$work/nested"
+
+# 3d. The error annotation. GitHub Actions reads the workflow commands of
+#     the STDOUT, so the annotation has to be there, and it has to be a
+#     STATIC sentence: the content of the repository goes to the STDERR,
+#     where it cannot inject a command.
+annotation="$(GITHUB_ACTIONS=true "$CHECK" "$work/focused" 2>/dev/null)"
+if printf '%s' "$annotation" | grep -q '^::error::'; then
+  echo "    OK: el fallo anota el error para GitHub Actions"
+else
+  echo "    FALLO: el fallo no anota el error, y el pipeline no lo muestra"
+  failures=$((failures + 1))
+fi
+
+# 3e. And the content of the repository does NOT reach the STDOUT, where
+#     a workflow command could be injected.
+if printf '%s' "$annotation" | grep -q 'test.only'; then
+  echo "    FALLO: el contenido del repositorio llego al STDOUT"
+  failures=$((failures + 1))
+else
+  echo "    OK: el contenido del repositorio no llega al STDOUT"
+fi
+
 # 4. A broken scan: it is NOT the same as a clean directory.
 mkdir -p "$work/unreadable"
 cat > "$work/unreadable/a_test.dart" << 'DART'
@@ -88,4 +119,4 @@ if [ "$failures" -gt 0 ]; then
   exit 1
 fi
 
-echo "    OK: las cinco ramas del guard se comportan como deben"
+echo "    OK: todas las ramas del guard se comportan como deben"

@@ -184,7 +184,7 @@ jobs:
         # The logic is in a script and not here, so that its branches can
         # be tested. See scripts/check-focused-tests.sh.
         working-directory: ${{ github.workspace }}
-        run: ./scripts/check-focused-tests.sh apps/mobile
+        run: ./scripts/check-focused-tests.sh
 
       - name: Tests
         run: flutter test
