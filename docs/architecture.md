@@ -730,6 +730,8 @@ iii-sdk=0.25.0-rc.4
 
 ## 9. CI/CD
 
+> **El manual operativo está en [`ci-pipeline.md`](./ci-pipeline.md):** cómo correr cada job en local, qué falla y por qué, las recetas (cambiar una versión, regenerar el cache de sqlx, agregar un check) y las trampas. Esta sección dice **por qué** el pipeline es como es; el manual dice **cómo se usa**.
+
 ### 9.1 Pipelines
 
 El pipeline está partido en dos archivos, y la partición es de naturaleza, no de tamaño:

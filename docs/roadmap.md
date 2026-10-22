@@ -245,6 +245,8 @@ README.md
 
 **Contexto:** el pipeline tiene que ser la red de seguridad de todo lo que viene. Un PR que rompe el build no llega a main.
 
+**Manual:** [`ci-pipeline.md`](./ci-pipeline.md) — cómo correr cada job en local, qué falla y por qué, y las recetas para cambiar una versión, regenerar el cache de sqlx o agregar un check.
+
 **Archivos:** `.github/workflows/ci.yml`, `.github/workflows/smoke.yml`, `scripts/smoke.sh`, `apps/mobile/test/app_smoke_test.dart`, `apps/business-web/.nvmrc`
 
 **Criterios de aceptación:**

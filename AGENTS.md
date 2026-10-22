@@ -33,6 +33,7 @@ subscription. This is a decision, not an omission.
 | How the system is built and why | [`docs/architecture.md`](docs/architecture.md) |
 | Why the code of a device is verified by SMS | [`docs/toma-control-dispositivo-sms.md`](docs/toma-control-dispositivo-sms.md) |
 | What the missing SMS provider has to satisfy | [`docs/contrato-proveedor-sms.md`](docs/contrato-proveedor-sms.md) |
+| How the CI pipeline is operated, and what breaks it | [`docs/ci-pipeline.md`](docs/ci-pipeline.md) |
 | What the verification found and the rules it produced | [`docs/verificacion-fase0.md`](docs/verificacion-fase0.md) |
 | What to build next | [`docs/roadmap.md`](docs/roadmap.md) |
 | Why the stack was measured and not assumed | [`docs/spike-iii-health.md`](docs/spike-iii-health.md) |
@@ -333,6 +334,16 @@ These are not folklore. Each one was hit and fixed.
 | A crate inside the workspace directory that is not a member | `cargo` refuses to build it from its own directory | Add it to `members` or to `exclude`; a spike with its own lockfile belongs in `exclude` |
 | A refusal that the database answers with `false` instead of an exception | The transaction is rolled back and the attempt counter is lost with it | A refusal is a result: commit the transaction |
 | The SMS of a verification goes to the participant that claims the device | An attacker who copied the token receives their own code and the transfer succeeds | The SMS goes to the participant that **owns** the device today |
+| A CI step that pipes two `grep`s | The exit status of the first one is lost, and a scan that never ran looks exactly like a clean repository | Separate the scan from the verdict and check both exit statuses |
+| A `grep` filter inside an assignment, under `bash -e` | An empty result exits 1, `set -e` kills the step before the verdict, and an empty result is exactly what "nothing found" means | Put the filter in the condition of an `if`, or add `|| true` |
+| The verdict of a filter taken from its exit status | An empty scan still produces a blank line, the filter keeps it, and the status says "found" when there is nothing | The verdict is the **content**: the command substitution eats the trailing newline |
+| A check whose branches are never executed | It only works on the day it was written: the guard that finds focused tests broke in the very branch it was written to exempt, and only a review noticed | The logic goes in a script, and the script has a test; the pipeline runs the test before the check |
+| `cargo build` after changing the schema | It is incremental, it does not re-expand the macros, and the offline cache of sqlx stays empty while the command says `Finished` | `touch services/db/src/lib.rs` before building, and regenerate the cache from zero |
+| The expansion of the sqlx macros never prunes | A deleted query leaves its cache file behind forever, and nothing in the pipeline notices | Regenerate the cache from zero and prune by hand: `docs/ci-pipeline.md` §5.2 |
+| `flutter test` with an empty `test/` directory | It exits 1: the job is red on its first day, before anyone wrote a test | A smoke test of the app, as `apps/mobile/test/app_smoke_test.dart` |
+| A script that starts a binary it never compiled | The spike is not a member of the workspace, so `cargo build --workspace` does not build it, and in CI the binary does not exist | The script compiles what it starts, with `--locked` |
+| `cargo` without `--locked` | It re-resolves the dependencies in silence, and the pipeline audits and tests a tree that is not the committed one | `--locked` on every cargo command of the pipeline |
+| The content of a repository file echoed to the stdout of a CI step | GitHub Actions reads the stdout for workflow commands, and the file can inject one into the log | The content goes to the stderr; the `::error::` annotation is a static sentence on the stdout |
 
 ---
 
