@@ -68,7 +68,7 @@ Los PRs encadenados se apilan así: `PR-1` (base) → `PR-2` (apila sobre `PR-1`
 
 > **Estado:** completadas `TSK-F0-01` a `TSK-F0-06`. El spike `spikes/iii-health` validó el engine, los workers del registro (`http`, `queue`, `cron`), un worker Rust propio, la ruta HTTP completa, **la ruta de colas y cron completa** y **los dos transportes de cola**, **sin KVM**. También fijó las versiones de iii (engine 0.24.6 + SDK 0.24.6), decidió el transporte de producción (`builtin`, `ADR-013`) y entregó el golden test de la derivación commit–reveal. Ver [`spike-iii-health.md`](./spike-iii-health.md) para el porqué, la mecánica y los hallazgos.
 >
-> **Abiertas:** `TSK-F0-07` (rate limits), `TSK-F0-08` (envío real del magic link), `TSK-F0-09` (rol de aplicación y smoke test del backend), `TSK-F0-11` (proveedor de SMS, que bloquea el despliegue de producción).
+> **Abiertas:** `TSK-F0-08` (envío real del magic link), `TSK-F0-09` (rol de aplicación y smoke test del backend), `TSK-F0-11` (proveedor de SMS, que bloquea el despliegue de producción).
 >
 > **Una función de la base falta todavía:** `claim_prize(p_prize_id, p_user_id, p_claim_code)`, sin la cual `FR-DR-08` y `POST /v1/me/prizes/{prize_id}/claim` no tienen camino. La especificación está en `docs/data-model.md` §3.27.
 
@@ -375,13 +375,13 @@ Este procedimiento está verificado: regenera las 7 queries vivas y el resultado
 
 **Épica:** E0.7 · **Depende de:** `TSK-F0-04` · **Esfuerzo:** 0,5 d
 
-**Contexto:** `api-contract.md` §1.6 define seis grupos de rate limit. No hay ninguno implementado: sin ellos, el registro por magic link es un vector de spam de correo y de enumeración de emails.
+**Contexto:** `api-contract.md` §1.6 define los grupos de rate limit. No hay ninguno implementado: sin ellos, el registro por magic link es un vector de spam de correo y de enumeración de emails.
 
 **Criterios de aceptación:**
-- [ ] Los seis grupos de §1.6 funcionan, con el límite por IP y por email donde corresponde.
-- [ ] La respuesta `429` incluye `Retry-After` y `X-RateLimit-Remaining`.
-- [ ] `users.last_magic_link_at` se usa para el grupo `auth:link`.
-- [ ] El rate limit vive en Redis, no en la memoria del proceso.
+- [x] **Los siete** grupos de §1.6 funcionan en el dominio, con el límite por IP y por email donde corresponde. La tarea decía "seis": el contrato define siete y el contrato es la verdad. Los de credenciales (`auth`, `auth:link`) ya están conectados a los endpoints; los demás entran con cada endpoint que se implemente.
+- [x] La respuesta `429` incluye `Retry-After` y `X-RateLimit-Remaining`.
+- [x] `users.last_magic_link_at` se usa para el grupo `auth:link`: enfriamiento durable de 3 min (ventana sobre límite) por la función `touch_last_magic_link`, que marca y devuelve la emisión anterior en una sola operación. Cada intento renueva la espera.
+- [x] El rate limit vive en Redis, no en la memoria del proceso: ventana fija con script Lua atómico, conexión eager (el worker no arranca sin el store) y claves con `SHA-256` sin PII. Store caído ⇒ `500 INTERNAL_ERROR`: falla cerrada.
 
 ---
 

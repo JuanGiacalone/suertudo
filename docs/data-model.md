@@ -652,7 +652,7 @@ CREATE TABLE auth_tokens (
 | Columna | Tipo | Razón |
 |---|---|---|
 | `notification_preferences` | `jsonb NOT NULL DEFAULT '{"push":true,"email":true,"marketing":false}'` | `marketing_opt_in` solo alcanzaba para el canal de marketing. Los canales operativos (push y email) necesitan su propio lugar: un participante puede rechazar el mail promocional y aun así querer el push que le avisa que ganó. La migración `0014_notification_preferences.sql` lo agrega con un `CHECK` que valida que las tres claves existan y sean booleanas. |
-| `last_magic_link_at` | `timestamptz` | Marca la última emisión de un magic link. Todavía **no se usa**: el rate limit de `api-contract.md` §1.6 todavía no está implementado (ver `TSK-F0-09`). |
+| `last_magic_link_at` | `timestamptz` | Enfriamiento durable del grupo `auth:link` de `api-contract.md` §1.6: separación mínima de 3 min entre emisiones de magic link, renovada por cada intento. Lo escribe la función `touch_last_magic_link` (migración `0043_rate_limits.sql`), que en **una sola operación** marca la fila y devuelve la emisión anterior. Una dirección sin usuario no tiene fila que marcar: la cubren los contadores del grupo. Implementado en `TSK-F0-07`. |
 
 ---
 

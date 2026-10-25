@@ -120,6 +120,39 @@ El cursor es un **cursor opaco** (base64url de un JSON con el último id y el ti
 | `public` | 300 | 1 min | Por IP |
 
 Respuesta: `429` con `Retry-After: <segundos>` y `X-RateLimit-Remaining`.
+Un `Retry-After` de `0` nunca sale: "probá ahora mismo" es justamente la
+rafaga que el límite está para frenar.
+
+**Cómo está implementado** (`TSK-F0-07`):
+
+- **Los contadores viven en Redis**, no en la memoria del proceso: hay más
+  de un worker y un límite que cada uno cuenta por su lado es un límite
+  que cada uno puede rodear por su lado. Cada worker arranca **con
+  conexión al store**: un worker que no puede alcanzar Redis no arranca.
+- **Ventana fija**: `INCR` + `EXPIRE` en una sola operación atómica (script
+  Lua), así que la ventana empieza con el primer golpe y no se estira.
+- **El store no conoce la política**: devuelve el golpe contados; el
+  cálculo del `remaining` y la decisión vive en el dominio. Las claves son
+  `SHA-256` del grupo, el alcance y el sujeto: **ningún email ni IP va
+  en claro** al store.
+- **Store caído no es permiso**: la respuesta es `500 INTERNAL_ERROR` con
+  `Retry-After` — no un `429`, porque el límite no se agotó: no se pudo
+  consultar. Falla **cerrada**.
+- **Dónde aplica hoy**: la fase de credenciales ya lo ejecuta —
+  `POST /v1/auth/magic-link` (grupos `auth` y `auth:link`),
+  `POST /v1/auth/verify` y `POST /v1/auth/refresh` (grupo `auth`). El
+  resto de los grupos entran con sus endpoints cada vez que se
+  implementen. `logout` y los endpoints autenticados de `/v1/me` no
+  llevan grupo: no exponen una credencial utilisable, el límite ahí no
+  tiene algo que proteger.
+- **El enfriamiento de `auth:link` es durable**: además del contador, la
+  separación mínima (ventana sobre límite: 15 min / 5 = 3 min) vive en
+  `users.last_magic_link_at`, marcado por la función `touch_last_magic_link`
+  que devuelve la emisión anterior en la misma operación. **Cada intento
+  renueva la espera**, incluido el rechazado: es lo que mantiene a un
+  abusador afuera. Una dirección que todavía no tiene usuario no tiene
+  registro que marcar: la cubren el contador de `auth:link` y el de
+  `auth` por IP.
 
 ---
 

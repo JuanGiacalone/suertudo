@@ -628,6 +628,7 @@ services:
 |---|---|
 | `DATABASE_URL` | Secret manager (env en local) |
 | `JWT_SECRET` / `JWT_REFRESH_SECRET` | Secret manager |
+| `REDIS_URL` | Secret manager (env en local). **Obligatoria** para los workers que limitan tasas (`identity` hoy): sin el store de contadores el worker **no arranca**. |
 | `SEED_ENCRYPTION_KEY` | Secret manager, **rotable** (ver §8.4) |
 | `FCM_SERVICE_ACCOUNT` | Secret manager |
 | `EMAIL_API_KEY` | Secret manager |
