@@ -201,7 +201,14 @@ async fn the_worker_only_takes_the_raffles_that_are_due() -> Result<(), Box<dyn 
     let business_id = seed_business(&pool).await?;
 
     let due = seed_raffle(&pool, business_id, "closed").await?;
-    sqlx::query("UPDATE raffles SET draws_at = now() - interval '1 minute' WHERE id = $1")
+    // The oldest of the window: the worker draws in order of `draws_at`,
+    // and a limit of 100 takes the oldest ones first. A date of
+    // `now() - 1 minute` put this raffle at the END of the window, and the
+    // closed raffles that the previous runs of the suite left behind —
+    // one per run, this test never draws its own— pushed it outside the
+    // limit. The pollution is real, and a test that only works while the
+    // table is clean is a test that does not work (`AGENTS.md` §9).
+    sqlx::query("UPDATE raffles SET draws_at = now() - interval '365 days' WHERE id = $1")
         .bind(due)
         .execute(&pool)
         .await?;
