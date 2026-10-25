@@ -205,6 +205,30 @@ impl UserRepository for PostgresUserRepository {
         })
     }
 
+    fn touch_magic_link(
+        &self,
+        email: &str,
+        at: i64,
+    ) -> BoxFuture<'static, Result<Option<i64>, StorageError>> {
+        let pool = self.pool.clone();
+        let email = email.to_string();
+        Box::pin(async move {
+            // The login has no tenant context either: the participant may
+            // not exist yet, and the address is the credential. The
+            // function of the schema marks the emission and returns the
+            // previous one, in a single operation.
+            let previous: Option<chrono::DateTime<chrono::Utc>> =
+                sqlx::query_scalar("SELECT touch_last_magic_link($1, to_timestamp($2))")
+                    .bind(&email)
+                    .bind(at as f64)
+                    .fetch_one(&*pool)
+                    .await
+                    .map_err(storage_error)?;
+
+            Ok(previous.map(|value| value.timestamp()))
+        })
+    }
+
     fn find_by_id(&self, id: &str) -> BoxFuture<'static, Result<Option<User>, StorageError>> {
         let pool = self.pool.clone();
         let id = id.to_string();

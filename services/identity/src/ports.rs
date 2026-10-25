@@ -170,6 +170,21 @@ pub trait UserRepository: Send + Sync {
         email: &str,
         display_name: &str,
     ) -> BoxFuture<'static, Result<User, StorageError>>;
+    /// Marks the moment a magic link went out to an address, and returns
+    /// the moment the previous one went out.
+    ///
+    /// `None` means that the address has no participant yet: the record is
+    /// the one of the participant, and a participant that does not exist
+    /// cannot have one.
+    ///
+    /// The mark and the read are the **same operation**: two requests that
+    /// arrive at the same time cannot both see an address without a
+    /// record.
+    fn touch_magic_link(
+        &self,
+        email: &str,
+        at: i64,
+    ) -> BoxFuture<'static, Result<Option<i64>, StorageError>>;
     /// Applies a patch to the profile and returns the stored participant.
     /// `None` means that the participant does not exist.
     fn update(

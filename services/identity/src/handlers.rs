@@ -11,11 +11,15 @@ use iii_sdk::protocol::RegisterTriggerInput;
 use iii_sdk::{IIIClient, RegisterFunction};
 use serde_json::{Value, json};
 
+use suertudo_api::ports::RateLimiter;
+use suertudo_api::rate_limit::{RateDecision, RateGroup, SubjectSet, client_ip, enforce};
+
+use crate::domain::errors::IdentityError;
 use crate::domain::service::IdentityService;
 use crate::domain::types::{
     DeviceRegistration, NotificationPreferences, ProfilePatch, Session, User,
 };
-use crate::http::{Request, accepted, created, failure, ok};
+use crate::http::{Request, accepted, created, failure, limiter_unavailable, ok};
 use crate::middleware::SessionResolver;
 
 /// What the handlers need to answer a request.
@@ -24,6 +28,8 @@ pub struct Deps {
     pub resolver: SessionResolver,
     /// Whether the token of a magic link travels in the response.
     pub dev_magic_link: bool,
+    /// The store of the counters of the rate limits.
+    pub limiter: Arc<dyn RateLimiter>,
 }
 
 impl std::fmt::Debug for Deps {
@@ -32,6 +38,39 @@ impl std::fmt::Debug for Deps {
             .field("dev_magic_link", &self.dev_magic_link)
             .finish_non_exhaustive()
     }
+}
+
+/// Applies a group of the contract to a request, and answers the refusal
+/// if there is one.
+///
+/// **A store that cannot be consulted is not a permission.** The request is
+/// refused with `INTERNAL_ERROR` —the limit was not reached, the limit
+/// could not be checked— and the reason goes to the logs.
+async fn check_limit(deps: &Deps, group: RateGroup, subjects: &SubjectSet) -> Result<(), Value> {
+    match enforce(&*deps.limiter, group, subjects).await {
+        Ok(RateDecision::Allowed) => Ok(()),
+        Ok(RateDecision::Limited {
+            retry_after,
+            remaining,
+        }) => Err(failure(&IdentityError::RateLimited {
+            // The answer never says "try again now": that is exactly the
+            // burst the limit is there to stop.
+            retry_after: retry_after.as_secs().max(1),
+            remaining,
+        })),
+        Err(error) => {
+            tracing::error!(%error, "the store of the rate limits is not reachable");
+            Err(limiter_unavailable(&error.to_string()))
+        }
+    }
+}
+
+/// The subjects of a request: the address of the client and the address of
+/// the participant, when the request has one.
+fn subjects_of(request: &Request, email: Option<&str>) -> SubjectSet {
+    SubjectSet::new()
+        .with_ip(client_ip(&request.headers))
+        .with_email(email.map(|value| value.to_string()))
 }
 
 /// Registers every function and trigger of the identity worker.
@@ -255,6 +294,17 @@ pub async fn request_magic_link(deps: &Deps, payload: Value) -> Value {
     let email = request.field("email").unwrap_or_default();
     let name = request.field("name");
 
+    // The groups of the contract (§1.6): `auth` counts the address and
+    // the participant, `auth:link` counts the participant alone, because
+    // a magic link is an email and an email is not cheap.
+    let subjects = subjects_of(&request, Some(email));
+    if let Err(answer) = check_limit(deps, RateGroup::Auth, &subjects).await {
+        return answer;
+    }
+    if let Err(answer) = check_limit(deps, RateGroup::AuthLink, &subjects).await {
+        return answer;
+    }
+
     match deps.service.request_magic_link(email, name).await {
         Ok(issued) => {
             let mut data = json!({
@@ -279,6 +329,12 @@ pub async fn verify_magic_link(deps: &Deps, payload: Value) -> Value {
     let request = Request::parse(&payload);
     let token = request.field("token").unwrap_or_default();
 
+    // The group `auth`, by address: the request has no participant yet.
+    let subjects = subjects_of(&request, None);
+    if let Err(answer) = check_limit(deps, RateGroup::Auth, &subjects).await {
+        return answer;
+    }
+
     match deps.service.verify_magic_link(token).await {
         Ok(session) => ok(session_json(&session)),
         Err(error) => failure(&error),
@@ -289,6 +345,12 @@ pub async fn verify_magic_link(deps: &Deps, payload: Value) -> Value {
 pub async fn refresh_session(deps: &Deps, payload: Value) -> Value {
     let request = Request::parse(&payload);
     let refresh_token = request.field("refresh_token").unwrap_or_default();
+
+    // The group `auth`, by address: the request has no participant yet.
+    let subjects = subjects_of(&request, None);
+    if let Err(answer) = check_limit(deps, RateGroup::Auth, &subjects).await {
+        return answer;
+    }
 
     match deps.service.refresh(refresh_token).await {
         Ok(session) => ok(session_json(&session)),

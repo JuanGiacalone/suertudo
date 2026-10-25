@@ -91,17 +91,17 @@ fn string_map(value: Option<&Value>) -> HashMap<String, String> {
 
 /// A successful answer.
 pub fn ok(data: Value) -> Value {
-    respond(200, json!({ "data": data }))
+    respond(200, default_headers(), json!({ "data": data }))
 }
 
 /// The answer of a resource that was created.
 pub fn created(data: Value) -> Value {
-    respond(201, json!({ "data": data }))
+    respond(201, default_headers(), json!({ "data": data }))
 }
 
 /// The answer of a request that was accepted but is not done yet.
 pub fn accepted(data: Value) -> Value {
-    respond(202, json!({ "data": data }))
+    respond(202, default_headers(), json!({ "data": data }))
 }
 
 /// The answer of a failure.
@@ -117,8 +117,25 @@ pub fn failure(error: &IdentityError) -> Value {
         details.insert("reason".to_string(), json!(detail));
     }
 
+    // A rate limit carries two more headers: how long the caller has to
+    // wait, and how many hits are left in the window
+    // (`docs/api-contract.md` §1.6).
+    let mut headers = default_headers();
+    if let IdentityError::RateLimited {
+        retry_after,
+        remaining,
+    } = error
+    {
+        headers.insert("retry-after".to_string(), (*retry_after).max(1).to_string());
+        headers.insert(
+            "x-ratelimit-remaining".to_string(),
+            (*remaining).to_string(),
+        );
+    }
+
     respond(
         error.status(),
+        headers,
         json!({
             "error": {
                 "code": error.code(),
@@ -130,11 +147,48 @@ pub fn failure(error: &IdentityError) -> Value {
     )
 }
 
+/// The answer of a request that could not be checked against its rate
+/// limit because the store was not reachable.
+///
+/// It is **not** a `429`: the limit was not reached, the limit could not
+/// be consulted. The catalogue says `INTERNAL_ERROR` for "algo falló de
+/// nuestro lado", and that is what happened. The client retries, and the
+/// worker does not serve traffic without a limit (`docs/api-contract.md`
+/// §1.6).
+pub fn limiter_unavailable(reason: &str) -> Value {
+    let error = IdentityError::Internal;
+    let mut details = serde_json::Map::new();
+    details.insert("reason".to_string(), json!(reason));
+
+    respond(
+        error.status(),
+        default_headers(),
+        json!({
+            "error": {
+                "code": error.code(),
+                "message": error.to_string(),
+                "details": Value::Object(details),
+                "trace_id": trace_id(),
+            }
+        }),
+    )
+}
+
+/// The headers every answer carries.
+fn default_headers() -> HashMap<String, String> {
+    let mut headers = HashMap::new();
+    headers.insert(
+        "content-type".to_string(),
+        "application/json; charset=utf-8".to_string(),
+    );
+    headers
+}
+
 /// Wraps a body with the status and the headers of the answer.
-fn respond(status_code: u16, body: Value) -> Value {
+fn respond(status_code: u16, headers: HashMap<String, String>, body: Value) -> Value {
     json!({
         "status_code": status_code,
-        "headers": { "content-type": "application/json; charset=utf-8" },
+        "headers": headers,
         "body": body,
     })
 }

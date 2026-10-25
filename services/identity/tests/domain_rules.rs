@@ -152,6 +152,7 @@ fn the_magic_link_travels_in_the_response_only_in_development() {
         ("DATABASE_URL", "postgres://localhost/suertudo"),
         ("JWT_SECRET", ACCESS_SECRET),
         ("JWT_REFRESH_SECRET", REFRESH_SECRET),
+        ("REDIS_URL", "redis://127.0.0.1:6379/"),
     ]))
     .unwrap();
 
@@ -172,6 +173,7 @@ fn the_worker_refuses_to_start_in_production_with_a_development_sender() {
         ("DATABASE_URL", "postgres://localhost/suertudo"),
         ("JWT_SECRET", ACCESS_SECRET),
         ("JWT_REFRESH_SECRET", REFRESH_SECRET),
+        ("REDIS_URL", "redis://127.0.0.1:6379/"),
     ]))
     .unwrap_err();
 
@@ -188,6 +190,7 @@ fn the_development_sender_in_staging_needs_the_explicit_consent() {
         ("DATABASE_URL", "postgres://localhost/suertudo"),
         ("JWT_SECRET", ACCESS_SECRET),
         ("JWT_REFRESH_SECRET", REFRESH_SECRET),
+        ("REDIS_URL", "redis://127.0.0.1:6379/"),
     ]))
     .unwrap_err();
 
@@ -202,6 +205,7 @@ fn the_development_sender_starts_in_staging_with_the_explicit_consent() {
         ("DATABASE_URL", "postgres://localhost/suertudo"),
         ("JWT_SECRET", ACCESS_SECRET),
         ("JWT_REFRESH_SECRET", REFRESH_SECRET),
+        ("REDIS_URL", "redis://127.0.0.1:6379/"),
     ]))
     .expect("staging may run with the sender of development when it is asked for");
 
@@ -218,6 +222,7 @@ fn the_explicit_consent_does_not_open_production() {
         ("DATABASE_URL", "postgres://localhost/suertudo"),
         ("JWT_SECRET", ACCESS_SECRET),
         ("JWT_REFRESH_SECRET", REFRESH_SECRET),
+        ("REDIS_URL", "redis://127.0.0.1:6379/"),
     ]))
     .unwrap_err();
 
@@ -231,6 +236,7 @@ fn the_development_sender_starts_in_development_without_asking_for_it() {
         ("DATABASE_URL", "postgres://localhost/suertudo"),
         ("JWT_SECRET", ACCESS_SECRET),
         ("JWT_REFRESH_SECRET", REFRESH_SECRET),
+        ("REDIS_URL", "redis://127.0.0.1:6379/"),
     ]))
     .expect("development may run with the sender of development");
 
@@ -245,6 +251,7 @@ fn the_worker_refuses_to_start_with_the_magic_link_outside_development() {
         ("DATABASE_URL", "postgres://localhost/suertudo"),
         ("JWT_SECRET", ACCESS_SECRET),
         ("JWT_REFRESH_SECRET", REFRESH_SECRET),
+        ("REDIS_URL", "redis://127.0.0.1:6379/"),
     ]))
     .unwrap_err();
 
@@ -271,6 +278,7 @@ fn a_short_signing_key_is_refused() {
         ("DATABASE_URL", "postgres://localhost/suertudo"),
         ("JWT_SECRET", "corto"),
         ("JWT_REFRESH_SECRET", REFRESH_SECRET),
+        ("REDIS_URL", "redis://127.0.0.1:6379/"),
     ]))
     .unwrap_err();
 

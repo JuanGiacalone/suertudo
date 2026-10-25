@@ -62,6 +62,17 @@ pub enum IdentityError {
     )]
     DeviceOwnerUnverifiable,
 
+    /// The request exhausted the rate limit of its group. The HTTP status
+    /// is `429`, and the answer carries `Retry-After` and
+    /// `X-RateLimit-Remaining` (`docs/api-contract.md` §1.6).
+    #[error("Demasiados intentos. Probá de nuevo en un rato.")]
+    RateLimited {
+        /// The seconds the caller has to wait.
+        retry_after: u64,
+        /// The hits that are left in the window.
+        remaining: u32,
+    },
+
     /// A refusal of the database that the catalogue of the contract names.
     ///
     /// The database refuses with a SQLSTATE and a message; the worker
@@ -163,6 +174,7 @@ impl IdentityError {
             IdentityError::Conflict => "CONFLICT",
             IdentityError::DeviceCodeInvalid => "DEVICE_CODE_INVALID",
             IdentityError::DeviceOwnerUnverifiable => "DEVICE_OWNER_UNVERIFIABLE",
+            IdentityError::RateLimited { .. } => "RATE_LIMITED",
             IdentityError::Internal => "INTERNAL_ERROR",
             IdentityError::Refused { refusal, .. } => refusal.code(),
         }
@@ -178,6 +190,7 @@ impl IdentityError {
             IdentityError::Conflict => 409,
             IdentityError::DeviceCodeInvalid => 400,
             IdentityError::DeviceOwnerUnverifiable => 409,
+            IdentityError::RateLimited { .. } => 429,
             IdentityError::Internal => 500,
             IdentityError::Refused { refusal, .. } => refusal.status(),
         }

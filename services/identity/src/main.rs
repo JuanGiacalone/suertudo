@@ -74,10 +74,23 @@ async fn main() -> Result<(), anyhow::Error> {
         sms,
     });
 
+    // The store of the counters of the rate limits. The connection is
+    // eager: **a worker that cannot reach the store does not start** — a
+    // rate limit that cannot be consulted is not a rate limit, and a
+    // worker that serves traffic without it is the open door the limit
+    // was there to close.
+    let limiter = suertudo_api::adapters::redis::RedisRateLimiter::connect(&config.redis_url)
+        .await
+        .map_err(|error| -> anyhow::Error {
+            anyhow::anyhow!("REDIS_URL: the store of the rate limits is not reachable: {error}")
+        })?;
+    tracing::info!(url = %config.redis_url, "the store of the rate limits is up");
+
     let deps = Arc::new(Deps {
         service,
         resolver: SessionResolver::new(signer),
         dev_magic_link: config.dev_magic_link,
+        limiter: Arc::new(limiter),
     });
 
     let url = std::env::var("III_URL").unwrap_or_else(|_| "ws://127.0.0.1:49134".to_string());

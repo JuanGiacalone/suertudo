@@ -110,6 +110,12 @@ pub struct Config {
     /// The provider of the SMS.
     pub sms_provider: SmsProvider,
     pub pool_max_connections: u32,
+    /// Where the counters of the rate limits live.
+    ///
+    /// The counters live in Redis and **not** in the memory of the process:
+    /// there is more than one worker, and a limit that each of them counts
+    /// on its own is a limit that each of them can be walked around by.
+    pub redis_url: String,
 }
 
 impl Config {
@@ -191,6 +197,8 @@ impl Config {
             .and_then(|value| value.parse::<u32>().ok())
             .unwrap_or(10);
 
+        let redis_url = non_empty(vars("REDIS_URL")).ok_or(ConfigError::Missing("REDIS_URL"))?;
+
         Ok(Self {
             environment,
             database_url,
@@ -199,6 +207,7 @@ impl Config {
             dev_magic_link,
             sms_provider,
             pool_max_connections,
+            redis_url,
         })
     }
 }

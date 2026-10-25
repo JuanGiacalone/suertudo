@@ -192,14 +192,14 @@ async fn the_magic_link_travels_in_the_response_only_in_development()
     let clock = Arc::new(TestClock::new(NOW));
     let setup = harness(clock.clone(), true).await?;
 
-    let development = deps(&setup.application, clock.clone(), true);
+    let development = deps(&setup.application, clock.clone(), true).await;
     let answer =
         handlers::request_magic_link(&development, request(json!({ "email": unique_email() })))
             .await;
     assert_eq!(status(&answer), 202);
     assert!(data(&answer)["dev_magic_link"].is_string());
 
-    let production = deps(&setup.application, clock, false);
+    let production = deps(&setup.application, clock, false).await;
     let answer =
         handlers::request_magic_link(&production, request(json!({ "email": unique_email() })))
             .await;
@@ -624,7 +624,7 @@ async fn the_row_of_a_participant_is_only_visible_with_its_context()
     );
 
     // The adapter reads it with the context of the participant.
-    let with_context = common::deps(&common::app_pool(&setup.owner).await?, clock, true);
+    let with_context = common::deps(&common::app_pool(&setup.owner).await?, clock, true).await;
     let user = with_context
         .service
         .users
@@ -663,7 +663,7 @@ async fn an_existing_participant_can_ask_for_another_link() -> Result<(), Box<dy
         .unwrap()
         .to_string();
 
-    let fresh = common::deps(&common::app_pool(&setup.owner).await?, clock, true);
+    let fresh = common::deps(&common::app_pool(&setup.owner).await?, clock, true).await;
     let answer = handlers::verify_magic_link(&fresh, request(json!({ "token": token }))).await;
     assert_eq!(
         status(&answer),
@@ -1446,7 +1446,7 @@ async fn a_concurrent_magic_link_request_answers_202() -> Result<(), Box<dyn std
     // waits for the second one.
     let barrier = Arc::new(tokio::sync::Barrier::new(2));
     let tokens = Arc::new(BarrierTokens::new(&setup.application, barrier));
-    let deps = deps_with_tokens(&setup.application, clock, true, tokens);
+    let deps = deps_with_tokens(&setup.application, clock, true, tokens).await;
 
     let email = unique_email();
     let (first, second) = tokio::time::timeout(Duration::from_secs(10), async {
@@ -1686,6 +1686,119 @@ async fn the_anonymisation_leaves_no_personal_data() -> Result<(), Box<dyn std::
         );
         assert!(!text.contains(&email), "the audit kept the address: {text}");
     }
+
+    Ok(())
+}
+
+/// The payload of a request that arrives through the edge: the edge puts
+/// the address of the client at the end of `X-Forwarded-For`.
+fn request_from(body: serde_json::Value, ip: &str) -> serde_json::Value {
+    serde_json::json!({
+        "body": body,
+        "headers": { "x-forwarded-for": ip },
+        "path_params": {},
+        "query_params": {},
+        "method": "POST",
+    })
+}
+
+/// An address of a client that does not repeat between runs: the counters
+/// of the rate limits live in Redis and survive a previous run of the
+/// suite, and a fixed address would inherit its own old counts.
+fn unique_ip() -> String {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+
+    let n = RandomState::new().build_hasher().finish() % 254 + 1;
+    format!("198.51.100.{n}")
+}
+
+#[tokio::test]
+async fn the_second_link_of_an_address_waits_for_its_cooling()
+-> Result<(), Box<dyn std::error::Error>> {
+    let clock = Arc::new(TestClock::new(NOW));
+    let setup = harness(clock.clone(), true).await?;
+    let deps = setup.deps.clone();
+    let email = unique_email();
+
+    let first = handlers::request_magic_link(&deps, request(json!({ "email": email }))).await;
+    assert_eq!(status(&first), 202, "the first link was refused: {first}");
+
+    // The cooling has a register only for an address that exists: an
+    // unknown address has no row to touch, and the counters of the group
+    // are its limit.
+    let token = data(&first)["dev_magic_link"]
+        .as_str()
+        .ok_or("the development mode did not return the magic link")?
+        .to_string();
+    let verified = handlers::verify_magic_link(&deps, request(json!({ "token": token }))).await;
+    assert_eq!(status(&verified), 200, "the link was refused: {verified}");
+
+    // The address exists now, and nothing marks it yet: this one passes
+    // and leaves the mark that cools the next.
+    let second = handlers::request_magic_link(&deps, request(json!({ "email": email }))).await;
+    assert_eq!(
+        status(&second),
+        202,
+        "the cooling started too early: {second}"
+    );
+
+    // The third attempt comes now, against the durable cooling: the
+    // separation of `auth:link` is the window over the limit, 15 min / 5.
+    let third = handlers::request_magic_link(&deps, request(json!({ "email": email }))).await;
+    assert_eq!(status(&third), 429, "the cooling was not enforced: {third}");
+    assert_eq!(error_code(&third), "RATE_LIMITED", "{third}");
+    assert_eq!(
+        third["headers"]["retry-after"], "180",
+        "the wait is the window over the limit: {third}"
+    );
+    assert_eq!(
+        third["headers"]["x-ratelimit-remaining"], "0",
+        "the cooling does not leave hits: {third}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_request_after_the_limit_of_the_address_gets_the_429()
+-> Result<(), Box<dyn std::error::Error>> {
+    let clock = Arc::new(TestClock::new(NOW));
+    let setup = harness(clock.clone(), true).await?;
+    let deps = setup.deps.clone();
+    let ip = unique_ip();
+
+    // The group `auth` allows 10 requests per address in 5 minutes
+    // (`docs/api-contract.md` §1.6). The addresses of the participants
+    // are different, so `auth:link` never runs out and only `auth`
+    // answers.
+    for _ in 0..10 {
+        let answer = handlers::request_magic_link(
+            &deps,
+            request_from(json!({ "email": unique_email() }), &ip),
+        )
+        .await;
+        assert_eq!(status(&answer), 202, "under the limit: {answer}");
+    }
+
+    let eleventh =
+        handlers::request_magic_link(&deps, request_from(json!({ "email": unique_email() }), &ip))
+            .await;
+    assert_eq!(status(&eleventh), 429, "over the limit: {eleventh}");
+    assert_eq!(error_code(&eleventh), "RATE_LIMITED", "{eleventh}");
+
+    let retry_after = eleventh["headers"]["retry-after"]
+        .as_str()
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or("the 429 of the counter has no retry-after")?;
+    assert!(
+        (1..=300).contains(&retry_after),
+        "the wait is inside the window of 5 minutes: {retry_after}"
+    );
+    assert_eq!(
+        eleventh["headers"]["x-ratelimit-remaining"], "0",
+        "the window is over: {eleventh}"
+    );
 
     Ok(())
 }

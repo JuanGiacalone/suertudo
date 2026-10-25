@@ -85,13 +85,14 @@ impl Clock for TestClock {
 }
 
 /// The dependencies of the handlers, over a real database.
-pub fn deps(pool: &PgPool, clock: Arc<TestClock>, dev_magic_link: bool) -> Arc<Deps> {
+pub async fn deps(pool: &PgPool, clock: Arc<TestClock>, dev_magic_link: bool) -> Arc<Deps> {
     deps_with_tokens(
         pool,
         clock,
         dev_magic_link,
         Arc::new(PostgresTokenRepository::new(Arc::new(pool.clone()))),
     )
+    .await
 }
 
 /// The sender of the tests: it records what the worker sent.
@@ -180,7 +181,8 @@ pub async fn harness(
         dev_magic_link,
         Arc::new(PostgresTokenRepository::new(Arc::new(application.clone()))),
         sms.clone(),
-    );
+    )
+    .await;
     Ok(Harness {
         owner,
         application,
@@ -193,7 +195,7 @@ pub async fn harness(
 ///
 /// The seam exists for the races: a test that has to reproduce an
 /// interleaving needs a store that pauses at a chosen point.
-pub fn deps_with_tokens(
+pub async fn deps_with_tokens(
     pool: &PgPool,
     clock: Arc<TestClock>,
     dev_magic_link: bool,
@@ -206,11 +208,12 @@ pub fn deps_with_tokens(
         tokens,
         Arc::new(RecordingSmsSender::default()),
     )
+    .await
 }
 
 /// The dependencies of the handlers, with the token store and the SMS
 /// channel of the caller.
-pub fn deps_with_sms(
+pub async fn deps_with_sms(
     pool: &PgPool,
     clock: Arc<TestClock>,
     dev_magic_link: bool,
@@ -238,6 +241,18 @@ pub fn deps_with_sms(
         }),
         resolver: SessionResolver::new(signer),
         dev_magic_link,
+        // The counters of the rate limits live in Redis, and the store of
+        // the tests is the one of the machine: the tests of the limits
+        // that need a full counter are not here, they are in the tests of
+        // the adapter (`tests/rate_limit_redis.rs`).
+        limiter: std::sync::Arc::new(
+            suertudo_api::adapters::redis::RedisRateLimiter::connect(
+                &std::env::var("REDIS_URL")
+                    .unwrap_or_else(|_| "redis://127.0.0.1:6379/".to_string()),
+            )
+            .await
+            .expect("the Redis of the tests has to be there"),
+        ),
     })
 }
 

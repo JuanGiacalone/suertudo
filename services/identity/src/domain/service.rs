@@ -9,6 +9,8 @@
 
 use std::sync::Arc;
 
+use suertudo_api::rate_limit::RateGroup;
+
 use crate::domain::errors::IdentityError;
 use crate::domain::profile::{validate_business_id, validate_device, validate_patch};
 use crate::domain::session::{
@@ -67,6 +69,30 @@ impl IdentityService {
     ) -> Result<MagicLinkIssued, IdentityError> {
         let email = normalise_email(email)?;
         let now = self.clock.now();
+
+        // The cooldown of the group `auth:link`.
+        //
+        // The counter of Redis is the limit of the contract: five links in
+        // fifteen minutes. This record is what stops the five of them from
+        // going out in the same second, and it is what survives a flush of
+        // the counter.
+        //
+        // Every attempt renews the wait, including a refused one: that is
+        // what keeps an abuser locked out, and it is what a login form does
+        // when it says "wait since your last attempt".
+        if let Some(spacing) = RateGroup::AuthLink.min_spacing() {
+            let previous = self.users.touch_magic_link(&email, now).await?;
+            if let Some(previous) = previous {
+                let elapsed = now - previous;
+                let spacing = spacing.as_secs() as i64;
+                if elapsed < spacing {
+                    return Err(IdentityError::RateLimited {
+                        retry_after: (spacing - elapsed).max(1) as u64,
+                        remaining: 0,
+                    });
+                }
+            }
+        }
 
         let name = name
             .map(str::trim)
