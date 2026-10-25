@@ -36,6 +36,9 @@ env:
   # `DATABASE_URL_TEST`, applies the migrations itself and creates the
   # role of the application.
   DATABASE_URL_TEST: postgres://suertudo:suertudo@127.0.0.1:5432/suertudo_test
+  # The store of the rate-limit counters. The harness of the tests reads
+  # this (with a local fallback) and the adapter tests need a live Redis.
+  REDIS_URL: redis://127.0.0.1:6379/
 
 jobs:
   rust:
@@ -55,6 +58,15 @@ jobs:
           --health-interval 5s
           --health-timeout 3s
           --health-retries 10
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+        ports:
+          - 6379:6379
     steps:
       - uses: actions/checkout@v4
 

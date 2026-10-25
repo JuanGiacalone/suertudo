@@ -27,6 +27,10 @@ up() {
   require iii
   require cargo
 
+  # The store of the rate-limit counters. The identity worker does not
+  # start without it: eager connection on purpose (`TSK-F0-07`).
+  export REDIS_URL="${REDIS_URL:-redis://127.0.0.1:6379/}"
+
   log "data services"
   if command -v docker >/dev/null 2>&1; then
     docker compose -f infra/docker-compose.yml up -d
