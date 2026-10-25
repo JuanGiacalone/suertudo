@@ -67,6 +67,12 @@ aes-gcm = "0.10"
 argon2 = "0.5"
 jsonwebtoken = "9"
 
+# --- cache and limits -----------------------------------------------------
+# The counters of the rate limits live in Redis, and not in the memory of
+# the process: the workers are several, and a limit that each of them counts
+# on its own is a limit that each of them can be walked around by.
+redis = { version = "1.7", features = ["tokio-comp", "connection-manager"] }
+
 # --- dev -------------------------------------------------------------------
 sqlx-cli = { version = "0.9", features = ["postgres", "macros"] }
 

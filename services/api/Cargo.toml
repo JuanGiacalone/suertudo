@@ -26,6 +26,11 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 schemars = { workspace = true }
 uuid = { workspace = true }
+# The key of a counter is a digest of its subject: the address of a
+# participant does not belong in the key of a Redis.
+sha2 = { workspace = true }
+hex = { workspace = true }
+redis = { workspace = true }
 chrono = { workspace = true }
 tokio = { workspace = true }
 futures-util = { workspace = true }

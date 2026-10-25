@@ -12,6 +12,9 @@
 //! `business_id` from the caller is a bug, and the isolation test in
 //! `tests/isolation.rs` exists to catch it.
 
+pub mod adapters;
 pub mod handlers;
 pub mod health;
 pub mod middleware;
+pub mod ports;
+pub mod rate_limit;
